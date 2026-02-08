@@ -44,7 +44,7 @@ except ImportError:
     HAS_PD = False
 
 # ============================================================
-# BIDIRECTIONAL CUSTOM COMPONENTS (auto_cam & live_cam)
+# BIDIRECTIONAL CUSTOM COMPONENTS
 # ============================================================
 from streamlit_components.auto_cam import auto_cam
 from streamlit_components.live_cam import live_cam
@@ -175,13 +175,11 @@ def preprocess_image(img_pil, target_size):
     return np.expand_dims(arr, axis=0)
 
 def decode_data_url(data_url):
-    """Decode a single base64 data-URL to PIL Image."""
     header, b64data = data_url.split(",", 1)
     img_bytes = base64.b64decode(b64data)
     return Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
 def decode_data_url_list(data_urls):
-    """Decode list of base64 data-URLs to list of PIL Images."""
     images = []
     if not data_urls:
         return images
@@ -268,12 +266,6 @@ def _find_last_conv_layer(model):
             if len(shape) == 4:
                 return layer.name
         except (AttributeError, RuntimeError):
-            pass
-        try:
-            shape = layer.output.shape
-            if len(shape) == 4:
-                return layer.name
-        except (AttributeError, RuntimeError, ValueError):
             pass
     return None
 
@@ -381,19 +373,6 @@ with st.sidebar:
             st.success(f"{len(custom_cats)} labels")
 
     st.markdown("---")
-    if class_mode == "Custom Model (.h5)":
-        if st.session_state.custom_model is not None:
-            st.markdown('\U0001f7e2 **Custom model aktif**')
-            if st.session_state.custom_categories:
-                st.caption(f"Labels: {', '.join(st.session_state.custom_categories)}")
-        else:
-            st.markdown('\U0001f534 **Belum ada model**')
-    elif class_mode == "Preset Kategori":
-        st.markdown(f'\U0001f7e1 **Preset: {len(custom_cats)} kategori**')
-    else:
-        st.markdown('\U0001f535 **ImageNet: 1000 kategori**')
-
-    st.markdown("---")
     top_k = st.slider("Top-K Prediksi:", 1, 20, 5)
     show_gradcam = st.checkbox("Tampilkan Grad-CAM", value=True)
     confidence_threshold = st.slider("Confidence Min (%):", 0, 100, 5)
@@ -479,9 +458,9 @@ with tab1:
             except Exception as e:
                 st.warning(f"Frame error: {e}")
 
-        img_input = None
+        img_input = None  # live handles its own display
 
-    else:
+    else:  # URL
         url = st.text_input("URL:", placeholder="https://example.com/image.jpg")
         if url:
             try:
@@ -492,15 +471,15 @@ with tab1:
                 st.error(f"Gagal: {e}")
 
     # Standard (non-live) classification
-    if img_input:
+    if img_input is not None:
         col_img, col_result = st.columns([1, 1])
         with col_img:
             st.markdown("### \U0001f5bc\ufe0f Gambar Input")
             st.image(img_input, width="stretch")
-            st.caption(f"{img_input.width} x {img_input.height} px")
+            st.caption(f"Ukuran: {img_input.width} x {img_input.height} px")
         with col_result:
             st.markdown("### \U0001f3af Hasil Klasifikasi")
-            if st.button("\U0001f680 Klasifikasi Sekarang!", type="primary", width="stretch", key="cls_btn"):
+            if st.button("\U0001f680 Klasifikasi Sekarang!", type="primary", key="cls_btn"):
                 with st.spinner("Menganalisis..."):
                     t0 = time.time()
                     results = classify_single(img_input, class_mode, model_choice, custom_cats, top_k, confidence_threshold)
@@ -548,12 +527,6 @@ with tab1:
 # ===================== TAB 2: BATCH =====================
 with tab2:
     st.markdown("## \U0001f4da Batch Klasifikasi")
-    if class_mode == "Custom Model (.h5)" and st.session_state.custom_model is not None:
-        st.markdown(f'\U0001f7e2 **Mode: Custom Model** \u2014 Labels: {", ".join(st.session_state.custom_categories or ["(no labels)"])}')
-    elif class_mode == "Preset Kategori":
-        st.markdown(f'\U0001f7e1 **Mode: Preset** \u2014 {", ".join(custom_cats)}')
-    else:
-        st.markdown('\U0001f535 **Mode: ImageNet (1000 Kategori)**')
     batch_files = st.file_uploader("Upload gambar:", type=["png","jpg","jpeg","bmp","webp"],
                                     accept_multiple_files=True, key="batch_upload")
     if batch_files:
@@ -575,17 +548,8 @@ with tab2:
             if all_results and HAS_PD:
                 df = pd.DataFrame(all_results)
                 st.dataframe(df, width="stretch")
-                pred_counts = df["prediction"].value_counts()
-                c1, c2 = st.columns(2)
-                with c1:
-                    for cat, cnt in pred_counts.items():
-                        st.markdown(f"- **{cat}**: {cnt} ({cnt/len(df)*100:.0f}%)")
-                with c2:
-                    if HAS_PLOTLY:
-                        fig = px.pie(values=pred_counts.values, names=pred_counts.index, title="Distribusi")
-                        st.plotly_chart(fig, width="stretch")
                 csv_buf = io.StringIO(); df.to_csv(csv_buf, index=False)
-                st.download_button("\U0001f4be Download CSV", csv_buf.getvalue(), "batch_results.csv", "text/csv", width="stretch")
+                st.download_button("\U0001f4be Download CSV", csv_buf.getvalue(), "batch_results.csv", "text/csv")
             st.markdown("### Gallery")
             cols = st.columns(4)
             for idx, f in enumerate(batch_files):
@@ -629,7 +593,7 @@ with tab3:
                     img_counts[cat] = len([f for f in os.listdir(cat_path) if f.lower().endswith((".jpg",".jpeg",".png",".bmp",".webp"))])
                 st.success(f"**{len(categories)}** kategori, **{sum(img_counts.values())}** gambar")
                 if HAS_PD:
-                    st.dataframe(pd.DataFrame({"Kategori": categories, "Jumlah": [img_counts[c] for c in categories]}), width="stretch")
+                    st.dataframe(pd.DataFrame({"Kategori": categories, "Jumlah": [img_counts[c] for c in categories]}))
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     base_model = st.selectbox("Base Model:", list(PRETRAINED_MODELS.keys()), key="train_base")
@@ -731,7 +695,7 @@ with tab3:
             key="auto_cam_training"
         )
 
-        if captured_frames is not None:
+        if captured_frames is not None and isinstance(captured_frames, list) and len(captured_frames) > 0:
             new_images = decode_data_url_list(captured_frames)
             if new_images:
                 st.session_state.cam_training_data[active_cat].extend(new_images)
@@ -758,7 +722,7 @@ with tab3:
             total_imgs += count
             summary_data.append({"Kategori": cat, "Jumlah Foto": count})
         if HAS_PD:
-            st.dataframe(pd.DataFrame(summary_data), width="stretch")
+            st.dataframe(pd.DataFrame(summary_data))
         st.markdown(f"**Total: {total_imgs} gambar**")
 
         # Preview
@@ -834,20 +798,20 @@ with tab3:
                 fig.add_trace(go.Scatter(y=th.get("accuracy", []), name="Train Acc", mode="lines+markers"))
                 fig.add_trace(go.Scatter(y=th.get("val_accuracy", []), name="Val Acc", mode="lines+markers"))
                 fig.update_layout(title="Accuracy", height=350)
-                st.plotly_chart(fig, width="stretch")
+                st.plotly_chart(fig)
             with c2:
                 fig2 = go.Figure()
                 fig2.add_trace(go.Scatter(y=th.get("loss", []), name="Train Loss", mode="lines+markers"))
                 fig2.add_trace(go.Scatter(y=th.get("val_loss", []), name="Val Loss", mode="lines+markers"))
                 fig2.update_layout(title="Loss", height=350)
-                st.plotly_chart(fig2, width="stretch")
+                st.plotly_chart(fig2)
         dl1, dl2, dl3 = st.columns(3)
         with dl1:
             st.download_button("\U0001f4be Download Model (.h5)", st.session_state.trained_model_bytes,
-                "trained_model.h5", width="stretch", key="dl_model")
+                "trained_model.h5", key="dl_model")
         with dl2:
             st.download_button("\U0001f4be Download Labels (.txt)", st.session_state.trained_labels_str,
-                "labels.txt", "text/plain", width="stretch", key="dl_labels")
+                "labels.txt", "text/plain", key="dl_labels")
         with dl3:
             if st.button("\U0001f5d1\ufe0f Clear Results", key="clear_train"):
                 st.session_state.trained_model_bytes = None
@@ -874,7 +838,7 @@ with tab4:
         if HAS_PD:
             df_h = pd.DataFrame([{"Waktu": h["timestamp"], "Model": h["model"], "Prediksi": h["top_prediction"],
                 "Confidence": f"{h['confidence']*100:.1f}%", "Proses": f"{h['elapsed']:.2f}s"} for h in hd])
-            st.dataframe(df_h, width="stretch")
+            st.dataframe(df_h)
         if HAS_PLOTLY:
             cats = [h["top_prediction"] for h in hd]
             cc = {}
@@ -883,13 +847,13 @@ with tab4:
             c1, c2 = st.columns(2)
             with c1:
                 st.plotly_chart(px.bar(x=list(cc.keys()), y=list(cc.values()), title="Distribusi",
-                    labels={"x":"Kategori","y":"Jumlah"}), width="stretch")
+                    labels={"x":"Kategori","y":"Jumlah"}))
             with c2:
                 st.plotly_chart(px.histogram(x=[h["confidence"]*100 for h in hd], nbins=20, title="Confidence",
-                    labels={"x":"Confidence (%)"}), width="stretch")
+                    labels={"x":"Confidence (%)"}))
         if HAS_PD:
             csv_buf = io.StringIO(); df_h.to_csv(csv_buf, index=False)
-            st.download_button("\U0001f4be CSV", csv_buf.getvalue(), "history.csv", "text/csv", width="stretch")
+            st.download_button("\U0001f4be CSV", csv_buf.getvalue(), "history.csv", "text/csv")
     else:
         st.info("Belum ada history.")
 
@@ -905,7 +869,7 @@ with tab5:
 ### \U0001f534 Real-Time Klasifikasi
 1. Pilih **\U0001f534 Real-Time (Live)** di tab Klasifikasi
 2. Kamera berjalan **smooth di browser** (native `<video>`)
-3. Frame dikirim ke AI setiap N detik (bisa diatur) \u2192 hasil klasifikasi langsung muncul
+3. Frame dikirim ke AI setiap N detik (bisa diatur)
 4. Tidak lag karena video di-render di browser, hanya 1 frame/interval dikirim ke server
 
 ### \U0001f4f7 Training dari Kamera (Hold-to-Capture)
@@ -915,7 +879,7 @@ with tab5:
 4. **Tahan tombol \U0001f4f7 (mouse/touch) atau tahan Spasi** \u2192 foto diambil otomatis terus-menerus!
 5. **Lepas** \u2192 semua foto langsung tersimpan ke kategori aktif
 6. Ulangi untuk kategori lainnya
-7. Klik **Train!** setelah cukup data (\u2265 2 foto/kategori, \u2265 2 kategori)
+7. Klik **Train!** setelah cukup data
 
 ### \U0001f916 Model
 
@@ -932,9 +896,6 @@ with tab5:
 - **ImageNet** \u2014 1000 kategori, langsung pakai
 - **Preset** \u2014 Bunga, tulang belakang, X-Ray, hewan, buah, kendaraan, digit
 - **Custom Model** \u2014 Upload `.h5` atau latih di tab Training
-
-### \U0001f525 Grad-CAM
-Area **merah/kuning** = bagian gambar yang paling mempengaruhi keputusan AI
     """)
 
 st.markdown("---")
