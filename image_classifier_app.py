@@ -42,142 +42,6 @@ except ImportError:
     HAS_PD = False
 
 # ============================================================
-# INLINE CAMERA: LIVE (capture & classify per click)
-# ============================================================
-def live_cam_html(interval_ms=1500, height=560):
-    html_code = """
-    <div id="root" style="text-align:center;font-family:sans-serif">
-      <video id="vid" autoplay playsinline muted
-        style="width:100%%;max-width:640px;border-radius:10px;background:#000"></video>
-      <div style="margin:12px 0">
-        <button id="snap-btn" onclick="snapNow()"
-          style="padding:18px 44px;font-size:1.15rem;border:none;border-radius:12px;cursor:pointer;
-          background:linear-gradient(135deg,#11998e,#38ef7d);color:#fff;font-weight:bold;
-          box-shadow:0 6px 20px rgba(17,153,142,0.45);transition:all .15s;
-          min-width:280px;min-height:58px;letter-spacing:0.3px">
-          &#128247; Capture &amp; Klasifikasi
-        </button>
-      </div>
-      <p id="status" style="color:#888;font-size:0.9rem">Menunggu kamera...</p>
-      <canvas id="cvs" style="display:none"></canvas>
-    </div>
-    <script>
-    (function(){
-      var vid=document.getElementById('vid');
-      var status=document.getElementById('status');
-      var cvs=document.getElementById('cvs');
-      var btn=document.getElementById('snap-btn');
-      navigator.mediaDevices.getUserMedia({
-        video:{facingMode:'environment',width:{ideal:640},height:{ideal:480}}
-      }).then(function(s){
-        vid.srcObject=s;
-        status.textContent='Kamera aktif. Klik tombol hijau untuk capture & klasifikasi.';
-        status.style.color='#27ae60';
-      }).catch(function(e){
-        status.textContent='Kamera error: '+e.message;
-        status.style.color='red';
-      });
-      window.snapNow=function(){
-        if(vid.readyState<2){status.textContent='Kamera belum siap...';return}
-        cvs.width=vid.videoWidth;cvs.height=vid.videoHeight;
-        cvs.getContext('2d').drawImage(vid,0,0);
-        var data=cvs.toDataURL('image/jpeg',0.85);
-        window.parent.postMessage({type:'streamlit:setComponentValue',value:data},'*');
-        btn.textContent='Mengirim frame...';
-        btn.style.background='linear-gradient(135deg,#667eea,#764ba2)';
-        setTimeout(function(){
-          btn.innerHTML='&#128247; Capture &amp; Klasifikasi';
-          btn.style.background='linear-gradient(135deg,#11998e,#38ef7d)';
-        },1200);
-      };
-    })();
-    </script>
-    """
-    return components.html(html_code, height=height, scrolling=False)
-
-# ============================================================
-# INLINE CAMERA: AUTO CAPTURE (hold to burst)
-# ============================================================
-def auto_cam_html(label="Tahan untuk Capture", interval_ms=300, height=620):
-    html_code = """
-    <div id="root2" style="text-align:center;font-family:sans-serif">
-      <video id="vid2" autoplay playsinline muted
-        style="width:100%%;max-width:640px;border-radius:10px;background:#000"></video>
-      <div style="margin:15px 0">
-        <button id="cap-btn"
-          style="padding:22px 50px;font-size:1.25rem;border:none;border-radius:14px;cursor:pointer;
-          background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;font-weight:bold;
-          user-select:none;-webkit-user-select:none;touch-action:manipulation;
-          box-shadow:0 8px 25px rgba(102,126,234,0.5);transition:all .15s;
-          min-width:300px;min-height:65px;letter-spacing:0.5px">
-          &#128248; """ + label + """</button>
-      </div>
-      <p id="counter2" style="font-size:1.4rem;font-weight:bold;color:#667eea;margin:5px 0">0 foto</p>
-      <p id="status2" style="color:#888;font-size:0.9rem;margin:2px 0">Kamera belum aktif...</p>
-      <canvas id="cvs2" style="display:none"></canvas>
-    </div>
-    <script>
-    (function(){
-      var vid2=document.getElementById('vid2');
-      var btn=document.getElementById('cap-btn');
-      var st2=document.getElementById('status2');
-      var counter2=document.getElementById('counter2');
-      var cvs2=document.getElementById('cvs2');
-      var capturing=false,timer=null,count=0,frames=[];
-      var INTERVAL=""" + str(interval_ms) + """;
-      var LABEL='""" + label + """';
-      navigator.mediaDevices.getUserMedia({
-        video:{facingMode:'environment',width:{ideal:640},height:{ideal:480}}
-      }).then(function(s){
-        vid2.srcObject=s;
-        st2.textContent='Kamera siap. Tahan tombol ungu untuk capture.';
-        st2.style.color='#27ae60';
-      }).catch(function(e){
-        st2.textContent='Kamera error: '+e.message;
-        st2.style.color='red';
-      });
-      function capOne(){
-        if(vid2.readyState<2)return;
-        cvs2.width=vid2.videoWidth;cvs2.height=vid2.videoHeight;
-        cvs2.getContext('2d').drawImage(vid2,0,0);
-        frames.push(cvs2.toDataURL('image/jpeg',0.85));
-        count++;
-        counter2.textContent=count+' foto captured';
-        counter2.style.color='#e74c3c';
-        btn.innerHTML='&#128308; Capturing... ('+count+')';
-        btn.style.background='linear-gradient(135deg,#e74c3c,#c0392b)';
-        btn.style.boxShadow='0 8px 25px rgba(231,76,60,0.5)';
-      }
-      function startCap(){
-        if(capturing)return;capturing=true;
-        capOne();timer=setInterval(capOne,INTERVAL);
-      }
-      function stopCap(){
-        if(!capturing)return;capturing=false;
-        clearInterval(timer);timer=null;
-        btn.innerHTML='&#128248; '+LABEL;
-        btn.style.background='linear-gradient(135deg,#667eea,#764ba2)';
-        btn.style.boxShadow='0 8px 25px rgba(102,126,234,0.5)';
-        counter2.style.color='#667eea';
-        if(frames.length>0){
-          window.parent.postMessage({type:'streamlit:setComponentValue',value:JSON.stringify(frames)},'*');
-          frames=[];
-        }
-      }
-      btn.addEventListener('mousedown',function(e){e.preventDefault();startCap()});
-      btn.addEventListener('mouseup',stopCap);
-      btn.addEventListener('mouseleave',stopCap);
-      btn.addEventListener('touchstart',function(e){e.preventDefault();startCap()},{passive:false});
-      btn.addEventListener('touchend',stopCap);
-      btn.addEventListener('touchcancel',stopCap);
-      document.addEventListener('keydown',function(e){if(e.code==='Space'&&!e.repeat){e.preventDefault();startCap()}});
-      document.addEventListener('keyup',function(e){if(e.code==='Space'){e.preventDefault();stopCap()}});
-    })();
-    </script>
-    """
-    return components.html(html_code, height=height, scrolling=False)
-
-# ============================================================
 # PAGE CONFIG & STYLE
 # ============================================================
 st.set_page_config(page_title="AI Image Classifier", page_icon="\U0001f9e0", layout="wide")
@@ -284,7 +148,7 @@ defaults = {
     "trained_history": None, "trained_acc": 0, "trained_val_acc": 0,
     "cam_training_data": {},
     "cam_training_categories": ["Kategori_A", "Kategori_B"],
-    "live_frame": None,
+    "cam_snap_counter": {},
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -302,28 +166,6 @@ def preprocess_image(img_pil, target_size):
     img = img_pil.convert("RGB").resize(target_size)
     arr = np.array(img).astype(np.float32)
     return np.expand_dims(arr, axis=0)
-
-def decode_data_url(data_url):
-    header, b64data = data_url.split(",", 1)
-    img_bytes = base64.b64decode(b64data)
-    return Image.open(io.BytesIO(img_bytes)).convert("RGB")
-
-def decode_data_url_list(raw):
-    images = []
-    if not raw:
-        return images
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except Exception:
-            raw = [raw]
-    if isinstance(raw, list):
-        for url in raw:
-            try:
-                images.append(decode_data_url(url))
-            except Exception:
-                pass
-    return images
 
 def classify_imagenet(img_pil, model_name, top_k=10):
     info = PRETRAINED_MODELS[model_name]
@@ -530,7 +372,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # ===================== TAB 1: KLASIFIKASI =====================
 with tab1:
     st.markdown("## \U0001f50d Klasifikasi Gambar")
-    input_method = st.radio("Input:", ["Upload", "Kamera (Snapshot)", "\U0001f534 Real-Time (Live)", "URL"],
+    input_method = st.radio("Input:", ["Upload", "Kamera (Snapshot)", "URL"],
                             horizontal=True, key="input_method")
 
     img_input = None
@@ -545,28 +387,6 @@ with tab1:
         cam = st.camera_input("Ambil foto")
         if cam:
             img_input = Image.open(cam).convert("RGB")
-
-    elif input_method == "\U0001f534 Real-Time (Live)":
-        st.markdown("""<div class="info-box">
-        <b>\U0001f534 Mode Live:</b> Kamera berjalan di browser. Klik tombol hijau <b>Capture & Klasifikasi</b>
-        untuk menangkap frame dan langsung diklasifikasi oleh AI.<br>
-        <b>Pastikan izinkan kamera saat browser meminta!</b>
-        </div>""", unsafe_allow_html=True)
-
-        live_cam_html(interval_ms=1500, height=560)
-
-        st.markdown("---")
-        st.markdown("### \U0001f4cb Cara Pakai Live Camera")
-        st.markdown("""
-1. Izinkan akses kamera saat browser meminta
-2. Arahkan kamera ke objek
-3. Klik tombol hijau **\U0001f4f7 Capture & Klasifikasi**
-4. Hasil klasifikasi muncul di bawah
-
-> **Note:** Karena keterbatasan Streamlit Cloud, mode live menggunakan tombol capture manual.
-> Untuk klasifikasi, gunakan tab **Kamera (Snapshot)** yang sudah terintegrasi penuh.
-        """)
-        img_input = None
 
     else:
         url = st.text_input("URL:", placeholder="https://example.com/image.jpg")
@@ -669,12 +489,15 @@ with tab2:
 with tab3:
     st.markdown("## \U0001f3eb Training Custom Model")
     train_source = st.radio("Sumber Data Training:",
-        ["\U0001f4c1 Upload ZIP", "\U0001f4f7 Ambil Foto dari Kamera"],
+        ["\U0001f4c1 Upload ZIP", "\U0001f4f7 Kamera (Foto per Foto)", "\U0001f4e4 Upload Foto Manual"],
         horizontal=True, key="train_source")
 
+    # ---- SOURCE 1: ZIP ----
     if train_source == "\U0001f4c1 Upload ZIP":
         st.markdown("""<div class="info-box">
-        <b>Cara:</b> Siapkan ZIP berisi sub-folder per kategori.
+        <b>Cara:</b> Siapkan ZIP berisi sub-folder per kategori. Contoh:<br>
+        <code>dataset.zip/kucing/</code> (isi foto kucing)<br>
+        <code>dataset.zip/anjing/</code> (isi foto anjing)
         </div>""", unsafe_allow_html=True)
         train_zip = st.file_uploader("Dataset (ZIP):", type=["zip"], key="train_zip")
         if train_zip:
@@ -753,14 +576,16 @@ with tab3:
                     st.session_state.trained_val_acc = history.history.get("val_accuracy", [0])[-1]
                     st.rerun()
 
-    else:
+    # ---- SOURCE 2: KAMERA (foto per foto, pakai st.camera_input) ----
+    elif train_source == "\U0001f4f7 Kamera (Foto per Foto)":
         st.markdown("""<div class="info-box">
         <b>\U0001f4f7 Cara pakai kamera untuk training:</b><br>
-        1. Tentukan nama-nama kategori<br>
+        1. Tentukan nama kategori<br>
         2. Pilih kategori aktif<br>
-        3. <b>Tahan tombol ungu (mouse/touch) atau tahan Spasi</b> untuk capture terus-menerus<br>
-        4. <b>Lepas</b> untuk simpan semua foto ke kategori<br>
-        5. Ulangi untuk kategori lain, lalu klik <b>Train!</b>
+        3. Ambil foto dengan kamera (bisa berkali-kali)<br>
+        4. Klik <b>"Simpan ke Kategori"</b> setiap kali ambil foto<br>
+        5. Ganti kategori aktif, ulangi<br>
+        6. Klik <b>Train!</b> setelah semua kategori terisi
         </div>""", unsafe_allow_html=True)
 
         st.markdown("### \U0001f3f7\ufe0f Atur Kategori")
@@ -777,43 +602,41 @@ with tab3:
                 st.session_state.cam_training_categories[i] = new_name
 
         st.markdown("---")
-        st.markdown("### \U0001f4f8 Capture Foto")
+        st.markdown("### \U0001f4f8 Ambil Foto dari Kamera")
 
-        active_cat = st.selectbox("\U0001f3af Kategori aktif:",
+        active_cat = st.selectbox("\U0001f3af Kategori aktif (foto akan disimpan ke sini):",
             st.session_state.cam_training_categories, key="active_capture_cat")
 
         if active_cat not in st.session_state.cam_training_data:
             st.session_state.cam_training_data[active_cat] = []
 
-        cap_interval = st.select_slider("Interval capture (ms):",
-            options=[100, 200, 300, 500, 750, 1000], value=300,
-            format_func=lambda x: f"{x}ms (~{1000//x} fps)", key="cap_interval")
+        current_count = len(st.session_state.cam_training_data[active_cat])
+        st.markdown(f'#### \U0001f3af Target: **{active_cat}** \u2014 Sudah: **{current_count}** foto')
 
-        st.markdown(f'**\U0001f3af Target: `{active_cat}`** \u2014 '
-                    f'Sudah: **{len(st.session_state.cam_training_data[active_cat])}** foto')
+        cam_photo = st.camera_input(f"Ambil foto untuk \"{active_cat}\"", key=f"train_cam_{active_cat}")
 
-        auto_cam_html(
-            label=f"Tahan untuk capture ke {active_cat}",
-            interval_ms=cap_interval,
-            height=620
-        )
-
-        extra_files = st.file_uploader(f"Atau upload file ke \"{active_cat}\":",
-            type=["png","jpg","jpeg","bmp","webp"], accept_multiple_files=True, key=f"extra_upload_{active_cat}")
-        if extra_files:
-            for ef in extra_files:
-                img = Image.open(ef).convert("RGB")
-                st.session_state.cam_training_data[active_cat].append(img)
-            st.success(f"+{len(extra_files)} gambar ditambahkan ke \"{active_cat}\"")
+        if cam_photo is not None:
+            cam_img = Image.open(cam_photo).convert("RGB")
+            col_preview, col_action = st.columns([1, 1])
+            with col_preview:
+                st.image(cam_img, caption="Preview foto", width="stretch")
+            with col_action:
+                st.markdown(f"Foto ini akan disimpan ke kategori **{active_cat}**")
+                if st.button(f"\u2705 Simpan ke \"{active_cat}\"", type="primary", key="save_cam_photo"):
+                    st.session_state.cam_training_data[active_cat].append(cam_img)
+                    st.success(f"Foto disimpan! Total {active_cat}: {len(st.session_state.cam_training_data[active_cat])} foto")
+                    st.rerun()
 
         st.markdown("---")
+
+        # Show dataset summary & previews (shared section)
         st.markdown("### \U0001f4ca Dataset Summary")
         total_imgs = 0
         summary_data = []
         for cat in st.session_state.cam_training_categories:
             count = len(st.session_state.cam_training_data.get(cat, []))
             total_imgs += count
-            summary_data.append({"Kategori": cat, "Jumlah Foto": count})
+            summary_data.append({"Kategori": cat, "Jumlah Foto": count, "Status": "\u2705 Siap" if count >= 2 else "\u26a0\ufe0f Kurang"})
         if HAS_PD:
             st.dataframe(pd.DataFrame(summary_data))
         st.markdown(f"**Total: {total_imgs} gambar**")
@@ -837,6 +660,7 @@ with tab3:
                 st.session_state.cam_training_data = {}
                 st.rerun()
 
+        # Training section
         st.markdown("---")
         st.markdown("### \U0001f3cb\ufe0f Training")
         valid_cats = {cat: imgs for cat, imgs in st.session_state.cam_training_data.items() if len(imgs) >= 2}
@@ -852,8 +676,8 @@ with tab3:
             with c3:
                 cam_lr = st.select_slider("LR:", [0.0001, 0.0005, 0.001, 0.005], value=0.001, key="cam_lr")
                 cam_freeze = st.checkbox("Freeze base", value=True, key="cam_freeze")
-            if st.button("\U0001f680 Train dari Foto Kamera!", type="primary", key="cam_train_btn"):
-                with st.spinner("Training model dari foto kamera..."):
+            if st.button("\U0001f680 Train dari Foto!", type="primary", key="cam_train_btn"):
+                with st.spinner("Training model..."):
                     prog = st.progress(0); prog.progress(10)
                     model, class_names, history = train_from_images(
                         valid_cats, cam_base, cam_epochs, cam_batch, cam_lr, cam_freeze)
@@ -872,6 +696,116 @@ with tab3:
                     prog.progress(100)
                 st.rerun()
 
+    # ---- SOURCE 3: UPLOAD FOTO MANUAL ----
+    else:
+        st.markdown("""<div class="info-box">
+        <b>\U0001f4e4 Upload foto manual per kategori:</b><br>
+        1. Tentukan nama kategori<br>
+        2. Pilih kategori aktif<br>
+        3. Upload beberapa foto sekaligus<br>
+        4. Ganti kategori, upload lagi<br>
+        5. Klik <b>Train!</b>
+        </div>""", unsafe_allow_html=True)
+
+        st.markdown("### \U0001f3f7\ufe0f Atur Kategori")
+        num_cats_m = st.number_input("Jumlah kategori:", min_value=2, max_value=20,
+            value=len(st.session_state.cam_training_categories), key="num_manual_cats")
+        while len(st.session_state.cam_training_categories) < num_cats_m:
+            st.session_state.cam_training_categories.append(f"Kategori_{len(st.session_state.cam_training_categories)+1}")
+        while len(st.session_state.cam_training_categories) > num_cats_m:
+            st.session_state.cam_training_categories.pop()
+        cat_cols_m = st.columns(min(num_cats_m, 4))
+        for i in range(num_cats_m):
+            with cat_cols_m[i % min(num_cats_m, 4)]:
+                new_name = st.text_input(f"Kategori {i+1}:", value=st.session_state.cam_training_categories[i], key=f"mcat_name_{i}")
+                st.session_state.cam_training_categories[i] = new_name
+
+        st.markdown("---")
+        active_cat_m = st.selectbox("\U0001f3af Kategori aktif:",
+            st.session_state.cam_training_categories, key="active_manual_cat")
+
+        if active_cat_m not in st.session_state.cam_training_data:
+            st.session_state.cam_training_data[active_cat_m] = []
+
+        st.markdown(f'**Target: `{active_cat_m}`** \u2014 Sudah: **{len(st.session_state.cam_training_data[active_cat_m])}** foto')
+
+        manual_files = st.file_uploader(f"Upload foto untuk \"{active_cat_m}\":",
+            type=["png","jpg","jpeg","bmp","webp"], accept_multiple_files=True, key=f"manual_upload_{active_cat_m}")
+        if manual_files:
+            if st.button(f"\u2705 Simpan {len(manual_files)} foto ke \"{active_cat_m}\"", type="primary", key="save_manual"):
+                for ef in manual_files:
+                    img = Image.open(ef).convert("RGB")
+                    st.session_state.cam_training_data[active_cat_m].append(img)
+                st.success(f"+{len(manual_files)} gambar ditambahkan! Total: {len(st.session_state.cam_training_data[active_cat_m])}")
+                st.rerun()
+
+        st.markdown("---")
+        st.markdown("### \U0001f4ca Dataset Summary")
+        total_imgs_m = 0
+        summary_data_m = []
+        for cat in st.session_state.cam_training_categories:
+            count = len(st.session_state.cam_training_data.get(cat, []))
+            total_imgs_m += count
+            summary_data_m.append({"Kategori": cat, "Jumlah Foto": count, "Status": "\u2705 Siap" if count >= 2 else "\u26a0\ufe0f Kurang"})
+        if HAS_PD:
+            st.dataframe(pd.DataFrame(summary_data_m))
+        st.markdown(f"**Total: {total_imgs_m} gambar**")
+
+        for cat in st.session_state.cam_training_categories:
+            imgs = st.session_state.cam_training_data.get(cat, [])
+            if imgs:
+                with st.expander(f"\U0001f5bc\ufe0f {cat} ({len(imgs)} foto)", expanded=False):
+                    preview_cols = st.columns(min(len(imgs), 6))
+                    for j, im in enumerate(imgs[:6]):
+                        with preview_cols[j]:
+                            st.image(im, caption=f"#{j+1}", width="stretch")
+                    if len(imgs) > 6:
+                        st.caption(f"... dan {len(imgs)-6} lainnya")
+                    if st.button(f"\U0001f5d1\ufe0f Hapus {cat}", key=f"mdel_cat_{cat}"):
+                        st.session_state.cam_training_data[cat] = []
+                        st.rerun()
+
+        if total_imgs_m > 0:
+            if st.button("\U0001f5d1\ufe0f Hapus Semua", key="mclear_all"):
+                st.session_state.cam_training_data = {}
+                st.rerun()
+
+        st.markdown("---")
+        st.markdown("### \U0001f3cb\ufe0f Training")
+        valid_cats_m = {cat: imgs for cat, imgs in st.session_state.cam_training_data.items() if len(imgs) >= 2}
+        if len(valid_cats_m) < 2:
+            st.warning("Minimal **2 kategori** dengan masing-masing **\u2265 2 foto** untuk mulai training.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                m_base = st.selectbox("Base Model:", list(PRETRAINED_MODELS.keys()), key="m_base")
+            with c2:
+                m_epochs = st.slider("Epochs:", 1, 50, 10, key="m_epochs")
+                m_batch = st.selectbox("Batch:", [4, 8, 16, 32], index=1, key="m_batch")
+            with c3:
+                m_lr = st.select_slider("LR:", [0.0001, 0.0005, 0.001, 0.005], value=0.001, key="m_lr")
+                m_freeze = st.checkbox("Freeze base", value=True, key="m_freeze")
+            if st.button("\U0001f680 Train!", type="primary", key="m_train_btn"):
+                with st.spinner("Training model..."):
+                    prog = st.progress(0); prog.progress(10)
+                    model, class_names, history = train_from_images(
+                        valid_cats_m, m_base, m_epochs, m_batch, m_lr, m_freeze)
+                    prog.progress(90)
+                    with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
+                        model.save(tmp.name)
+                        with open(tmp.name, "rb") as mf:
+                            model_bytes = mf.read()
+                    st.session_state.custom_model = model
+                    st.session_state.custom_categories = class_names
+                    st.session_state.trained_model_bytes = model_bytes
+                    st.session_state.trained_labels_str = "\n".join(class_names)
+                    st.session_state.trained_history = history.history
+                    st.session_state.trained_acc = history.history["accuracy"][-1]
+                    st.session_state.trained_val_acc = history.history.get("val_accuracy", [0])[-1]
+                    prog.progress(100)
+                st.rerun()
+
+    # ---- TRAINING RESULTS (shared) ----
     if st.session_state.trained_model_bytes is not None:
         st.markdown("---")
         st.markdown("### \u2705 Training Results")
@@ -962,26 +896,29 @@ with tab5:
 3. Klik **Take Photo** untuk ambil gambar
 4. Klik **Klasifikasi Sekarang!**
 
-### Real-Time (Live)
-1. Pilih **Real-Time (Live)** di tab Klasifikasi
-2. **Izinkan kamera** saat browser meminta
-3. Arahkan kamera ke objek
-4. Klik tombol hijau **Capture & Klasifikasi**
-
 ### Training dari Kamera
-1. Tab **Training** > **Ambil Foto dari Kamera**
+1. Tab **Training** > pilih **Kamera (Foto per Foto)**
 2. Tentukan nama-nama kategori
 3. Pilih kategori aktif
-4. **Tahan tombol ungu** untuk capture terus-menerus
-5. **Lepas** untuk simpan foto
-6. Ulangi untuk kategori lainnya
+4. **Enable Camera** > **Take Photo**
+5. Klik **Simpan ke Kategori**
+6. Ulangi untuk foto berikutnya
+7. Ganti kategori aktif, ulangi
+8. Klik **Train!** setelah semua kategori terisi (min 2 foto per kategori)
+
+### Training dari Upload
+1. Tab **Training** > pilih **Upload Foto Manual**
+2. Tentukan nama-nama kategori
+3. Pilih kategori aktif
+4. Upload beberapa foto sekaligus
+5. Klik **Simpan**
+6. Ganti kategori, upload lagi
 7. Klik **Train!**
 
 ### Troubleshoot Kamera
 - **Kotak hitam?** Klik gembok di URL > Kamera > Izinkan > Refresh
 - **HP?** Gunakan Chrome, bukan browser bawaan
-- **Masih hitam?** Tutup app lain yang pakai kamera (Zoom, WhatsApp)
-- **Safari iOS?** Gunakan Chrome
+- **Masih hitam?** Tutup app lain yang pakai kamera
 
 ### Model
 
