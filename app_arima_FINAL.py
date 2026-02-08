@@ -552,7 +552,7 @@ elif module=='garch':
         st.markdown("""
 ### Cara Install
 
-**Streamlit Cloud:** Tambahkan `arch` di file `requirements.txt` pada repository, lalu redeploy.
+**Streamlit Cloud:** Tambahkan `arch` di file `requirements-arima.txt` pada repository, lalu redeploy.
 
 ```text
 streamlit
