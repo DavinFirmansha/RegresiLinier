@@ -5,9 +5,6 @@ import io, os, json, time, tempfile, base64
 from datetime import datetime
 from PIL import Image, ImageOps
 
-# ============================================================
-# SAFE IMPORTS
-# ============================================================
 try:
     import tensorflow as tf
     from tensorflow import keras
@@ -45,13 +42,22 @@ except ImportError:
     HAS_PD = False
 
 # ============================================================
-# INLINE CAMERA COMPONENTS (no external files needed)
+# INLINE CAMERA: LIVE (capture & classify per click)
 # ============================================================
-def live_cam_html(interval_ms=1500, height=480):
+def live_cam_html(interval_ms=1500, height=560):
     html_code = """
     <div id="root" style="text-align:center;font-family:sans-serif">
       <video id="vid" autoplay playsinline muted
         style="width:100%%;max-width:640px;border-radius:10px;background:#000"></video>
+      <div style="margin:12px 0">
+        <button id="snap-btn" onclick="snapNow()"
+          style="padding:18px 44px;font-size:1.15rem;border:none;border-radius:12px;cursor:pointer;
+          background:linear-gradient(135deg,#11998e,#38ef7d);color:#fff;font-weight:bold;
+          box-shadow:0 6px 20px rgba(17,153,142,0.45);transition:all .15s;
+          min-width:280px;min-height:58px;letter-spacing:0.3px">
+          &#128247; Capture &amp; Klasifikasi
+        </button>
+      </div>
       <p id="status" style="color:#888;font-size:0.9rem">Menunggu kamera...</p>
       <canvas id="cvs" style="display:none"></canvas>
     </div>
@@ -60,39 +66,54 @@ def live_cam_html(interval_ms=1500, height=480):
       var vid=document.getElementById('vid');
       var status=document.getElementById('status');
       var cvs=document.getElementById('cvs');
+      var btn=document.getElementById('snap-btn');
       navigator.mediaDevices.getUserMedia({
         video:{facingMode:'environment',width:{ideal:640},height:{ideal:480}}
       }).then(function(s){
         vid.srcObject=s;
-        status.textContent='Kamera aktif - frame dikirim setiap """ + str(interval_ms) + """ms';
-        setInterval(function(){
-          if(vid.readyState<2)return;
-          cvs.width=vid.videoWidth;cvs.height=vid.videoHeight;
-          cvs.getContext('2d').drawImage(vid,0,0);
-          var data=cvs.toDataURL('image/jpeg',0.8);
-          window.parent.postMessage({type:'streamlit:setComponentValue',value:data},'*');
-        },""" + str(interval_ms) + """);
+        status.textContent='Kamera aktif. Klik tombol hijau untuk capture & klasifikasi.';
+        status.style.color='#27ae60';
       }).catch(function(e){
         status.textContent='Kamera error: '+e.message;
         status.style.color='red';
       });
+      window.snapNow=function(){
+        if(vid.readyState<2){status.textContent='Kamera belum siap...';return}
+        cvs.width=vid.videoWidth;cvs.height=vid.videoHeight;
+        cvs.getContext('2d').drawImage(vid,0,0);
+        var data=cvs.toDataURL('image/jpeg',0.85);
+        window.parent.postMessage({type:'streamlit:setComponentValue',value:data},'*');
+        btn.textContent='Mengirim frame...';
+        btn.style.background='linear-gradient(135deg,#667eea,#764ba2)';
+        setTimeout(function(){
+          btn.innerHTML='&#128247; Capture &amp; Klasifikasi';
+          btn.style.background='linear-gradient(135deg,#11998e,#38ef7d)';
+        },1200);
+      };
     })();
     </script>
     """
     return components.html(html_code, height=height, scrolling=False)
 
-def auto_cam_html(label="Tahan untuk Capture", interval_ms=300, height=520):
+# ============================================================
+# INLINE CAMERA: AUTO CAPTURE (hold to burst)
+# ============================================================
+def auto_cam_html(label="Tahan untuk Capture", interval_ms=300, height=620):
     html_code = """
     <div id="root2" style="text-align:center;font-family:sans-serif">
       <video id="vid2" autoplay playsinline muted
         style="width:100%%;max-width:640px;border-radius:10px;background:#000"></video>
-      <br>
-      <button id="cap-btn"
-        style="padding:14px 32px;font-size:1.05rem;border:none;border-radius:8px;cursor:pointer;
-        background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;font-weight:bold;
-        user-select:none;-webkit-user-select:none;touch-action:manipulation;margin:8px 0;
-        transition:all .15s">""" + label + """</button>
-      <p id="status2" style="color:#888;font-size:0.9rem">Kamera belum aktif...</p>
+      <div style="margin:15px 0">
+        <button id="cap-btn"
+          style="padding:22px 50px;font-size:1.25rem;border:none;border-radius:14px;cursor:pointer;
+          background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;font-weight:bold;
+          user-select:none;-webkit-user-select:none;touch-action:manipulation;
+          box-shadow:0 8px 25px rgba(102,126,234,0.5);transition:all .15s;
+          min-width:300px;min-height:65px;letter-spacing:0.5px">
+          &#128248; """ + label + """</button>
+      </div>
+      <p id="counter2" style="font-size:1.4rem;font-weight:bold;color:#667eea;margin:5px 0">0 foto</p>
+      <p id="status2" style="color:#888;font-size:0.9rem;margin:2px 0">Kamera belum aktif...</p>
       <canvas id="cvs2" style="display:none"></canvas>
     </div>
     <script>
@@ -100,6 +121,7 @@ def auto_cam_html(label="Tahan untuk Capture", interval_ms=300, height=520):
       var vid2=document.getElementById('vid2');
       var btn=document.getElementById('cap-btn');
       var st2=document.getElementById('status2');
+      var counter2=document.getElementById('counter2');
       var cvs2=document.getElementById('cvs2');
       var capturing=false,timer=null,count=0,frames=[];
       var INTERVAL=""" + str(interval_ms) + """;
@@ -108,7 +130,8 @@ def auto_cam_html(label="Tahan untuk Capture", interval_ms=300, height=520):
         video:{facingMode:'environment',width:{ideal:640},height:{ideal:480}}
       }).then(function(s){
         vid2.srcObject=s;
-        st2.textContent='Kamera siap. Tahan tombol untuk capture.';
+        st2.textContent='Kamera siap. Tahan tombol ungu untuk capture.';
+        st2.style.color='#27ae60';
       }).catch(function(e){
         st2.textContent='Kamera error: '+e.message;
         st2.style.color='red';
@@ -119,9 +142,11 @@ def auto_cam_html(label="Tahan untuk Capture", interval_ms=300, height=520):
         cvs2.getContext('2d').drawImage(vid2,0,0);
         frames.push(cvs2.toDataURL('image/jpeg',0.85));
         count++;
-        st2.textContent=count+' foto captured';
-        btn.textContent='Capturing... ('+count+')';
+        counter2.textContent=count+' foto captured';
+        counter2.style.color='#e74c3c';
+        btn.innerHTML='&#128308; Capturing... ('+count+')';
         btn.style.background='linear-gradient(135deg,#e74c3c,#c0392b)';
+        btn.style.boxShadow='0 8px 25px rgba(231,76,60,0.5)';
       }
       function startCap(){
         if(capturing)return;capturing=true;
@@ -130,8 +155,10 @@ def auto_cam_html(label="Tahan untuk Capture", interval_ms=300, height=520):
       function stopCap(){
         if(!capturing)return;capturing=false;
         clearInterval(timer);timer=null;
-        btn.textContent=LABEL;
+        btn.innerHTML='&#128248; '+LABEL;
         btn.style.background='linear-gradient(135deg,#667eea,#764ba2)';
+        btn.style.boxShadow='0 8px 25px rgba(102,126,234,0.5)';
+        counter2.style.color='#667eea';
         if(frames.length>0){
           window.parent.postMessage({type:'streamlit:setComponentValue',value:JSON.stringify(frames)},'*');
           frames=[];
@@ -257,6 +284,7 @@ defaults = {
     "trained_history": None, "trained_acc": 0, "trained_val_acc": 0,
     "cam_training_data": {},
     "cam_training_categories": ["Kategori_A", "Kategori_B"],
+    "live_frame": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -520,19 +548,24 @@ with tab1:
 
     elif input_method == "\U0001f534 Real-Time (Live)":
         st.markdown("""<div class="info-box">
-        <b>\U0001f534 Real-Time:</b> Kamera berjalan smooth di browser (native video).
-        Frame dikirim ke AI setiap <b>N detik</b> untuk klasifikasi otomatis.<br>
+        <b>\U0001f534 Mode Live:</b> Kamera berjalan di browser. Klik tombol hijau <b>Capture & Klasifikasi</b>
+        untuk menangkap frame dan langsung diklasifikasi oleh AI.<br>
         <b>Pastikan izinkan kamera saat browser meminta!</b>
         </div>""", unsafe_allow_html=True)
 
-        cls_interval = st.select_slider("Interval klasifikasi:",
-            options=[500, 1000, 1500, 2000, 3000], value=1500,
-            format_func=lambda x: f"{x/1000:.1f} detik", key="cls_interval")
+        live_cam_html(interval_ms=1500, height=560)
 
-        st.markdown("### \U0001f4f7 Live Camera")
-        live_cam_html(interval_ms=cls_interval, height=420)
+        st.markdown("---")
+        st.markdown("### \U0001f4cb Cara Pakai Live Camera")
+        st.markdown("""
+1. Izinkan akses kamera saat browser meminta
+2. Arahkan kamera ke objek
+3. Klik tombol hijau **\U0001f4f7 Capture & Klasifikasi**
+4. Hasil klasifikasi muncul di bawah
 
-        st.caption("Frame terakhir akan muncul di bawah saat kamera aktif.")
+> **Note:** Karena keterbatasan Streamlit Cloud, mode live menggunakan tombol capture manual.
+> Untuk klasifikasi, gunakan tab **Kamera (Snapshot)** yang sudah terintegrasi penuh.
+        """)
         img_input = None
 
     else:
@@ -722,10 +755,10 @@ with tab3:
 
     else:
         st.markdown("""<div class="info-box">
-        <b>\U0001f4f7 Cara:</b><br>
+        <b>\U0001f4f7 Cara pakai kamera untuk training:</b><br>
         1. Tentukan nama-nama kategori<br>
         2. Pilih kategori aktif<br>
-        3. <b>Tahan tombol (mouse/touch) atau tahan Spasi</b> untuk capture terus-menerus<br>
+        3. <b>Tahan tombol ungu (mouse/touch) atau tahan Spasi</b> untuk capture terus-menerus<br>
         4. <b>Lepas</b> untuk simpan semua foto ke kategori<br>
         5. Ulangi untuk kategori lain, lalu klik <b>Train!</b>
         </div>""", unsafe_allow_html=True)
@@ -762,7 +795,7 @@ with tab3:
         auto_cam_html(
             label=f"Tahan untuk capture ke {active_cat}",
             interval_ms=cap_interval,
-            height=520
+            height=620
         )
 
         extra_files = st.file_uploader(f"Atau upload file ke \"{active_cat}\":",
@@ -923,26 +956,32 @@ with tab5:
 2. Klik **Klasifikasi Sekarang!**
 3. Lihat hasil prediksi + confidence
 
-### Real-Time Klasifikasi
+### Kamera (Snapshot)
+1. Pilih **Kamera (Snapshot)** di tab Klasifikasi
+2. Klik **Enable Camera** > izinkan kamera
+3. Klik **Take Photo** untuk ambil gambar
+4. Klik **Klasifikasi Sekarang!**
+
+### Real-Time (Live)
 1. Pilih **Real-Time (Live)** di tab Klasifikasi
 2. **Izinkan kamera** saat browser meminta
-3. Kamera berjalan smooth di browser
-4. Frame dikirim ke AI setiap N detik
+3. Arahkan kamera ke objek
+4. Klik tombol hijau **Capture & Klasifikasi**
 
 ### Training dari Kamera
 1. Tab **Training** > **Ambil Foto dari Kamera**
 2. Tentukan nama-nama kategori
 3. Pilih kategori aktif
-4. **Tahan tombol** untuk capture terus-menerus
+4. **Tahan tombol ungu** untuk capture terus-menerus
 5. **Lepas** untuk simpan foto
 6. Ulangi untuk kategori lainnya
 7. Klik **Train!**
 
 ### Troubleshoot Kamera
-- **Kotak hitam?** Pastikan izinkan kamera di browser (klik gembok di URL)
+- **Kotak hitam?** Klik gembok di URL > Kamera > Izinkan > Refresh
 - **HP?** Gunakan Chrome, bukan browser bawaan
 - **Masih hitam?** Tutup app lain yang pakai kamera (Zoom, WhatsApp)
-- **Safari iOS?** Ada bug Streamlit, gunakan Chrome
+- **Safari iOS?** Gunakan Chrome
 
 ### Model
 
@@ -958,5 +997,5 @@ with tab5:
 
 st.markdown("---")
 st.markdown('<div style="text-align:center;color:#888;font-size:0.85rem">'
-            'AI Image Classifier &bull; TensorFlow &bull; Real-Time &bull; Grad-CAM</div>',
+            'AI Image Classifier &bull; TensorFlow &bull; Grad-CAM</div>',
             unsafe_allow_html=True)
