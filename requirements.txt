@@ -17,3 +17,4 @@ openpyxl
 imbalanced-learn
 opencv-python-headless
 tensorflow
+Pillow
