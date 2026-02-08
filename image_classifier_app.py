@@ -43,6 +43,12 @@ try:
 except ImportError:
     HAS_PD = False
 
+try:
+    from camera_input_live import camera_input_live
+    HAS_LIVE_CAM = True
+except ImportError:
+    HAS_LIVE_CAM = False
+
 # ============================================================
 # PAGE CONFIG & STYLE
 # ============================================================
@@ -60,6 +66,10 @@ text-align:center;color:white!important;margin:.3rem 0}.metric-card *{color:whit
 .info-box,.info-box *{color:#1a4971!important}
 .success-box{background:#D5F5E3;border-left:5px solid #27AE60;padding:1rem;border-radius:5px;margin:.5rem 0}
 .success-box,.success-box *{color:#145a32!important}
+.capture-btn{font-size:1.1rem;padding:.5rem 1rem}
+.cat-header{background:linear-gradient(135deg,#667eea,#764ba2);color:white;padding:.5rem 1rem;
+border-radius:8px;margin:.3rem 0;text-align:center}
+.cat-header *{color:white!important}
 </style>""", unsafe_allow_html=True)
 
 st.markdown('<div class="main-header">\U0001f9e0 AI Image Classifier</div>', unsafe_allow_html=True)
@@ -148,6 +158,9 @@ defaults = {
     "classification_history": [], "training_log": [],
     "trained_model_bytes": None, "trained_labels_str": None,
     "trained_history": None, "trained_acc": 0, "trained_val_acc": 0,
+    "cam_training_data": {},
+    "cam_training_categories": ["Kategori_A", "Kategori_B"],
+    "live_classify_running": False,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -231,7 +244,6 @@ def build_transfer_model(base_model_name, num_classes, freeze_base=True):
     return m
 
 def _find_last_conv_layer(model):
-    """Find last conv layer — compatible with Keras 2 AND Keras 3 (TF 2.20+)."""
     for layer in reversed(model.layers):
         class_name = layer.__class__.__name__.lower()
         if "conv" in class_name:
@@ -278,6 +290,39 @@ def overlay_heatmap(img_pil, heatmap, alpha=0.4):
     else:
         colored = np.stack([hm, np.zeros_like(hm), 255 - hm], axis=2)
     return Image.fromarray(np.clip(img * (1 - alpha) + colored * alpha, 0, 255).astype(np.uint8))
+
+def train_from_images(image_dict, base_model_name, epochs, batch_size, lr, freeze, augment):
+    """Train model from in-memory image dict {category: [PIL images]}."""
+    info = PRETRAINED_MODELS[base_model_name]
+    target_size = info["size"]
+    categories = sorted(image_dict.keys())
+    num_classes = len(categories)
+    X, Y = [], []
+    for idx, cat in enumerate(categories):
+        for img_pil in image_dict[cat]:
+            arr = preprocess_image(img_pil, target_size)
+            arr = info["preprocess"](arr)
+            X.append(arr[0])
+            label = np.zeros(num_classes)
+            label[idx] = 1.0
+            Y.append(label)
+    X = np.array(X)
+    Y = np.array(Y)
+    indices = np.arange(len(X))
+    np.random.shuffle(indices)
+    X, Y = X[indices], Y[indices]
+    split = max(1, int(len(X) * 0.2))
+    X_val, Y_val = X[:split], Y[:split]
+    X_train, Y_train = X[split:], Y[split:]
+    if len(X_train) == 0:
+        X_train, Y_train = X, Y
+    model = build_transfer_model(base_model_name, num_classes, freeze)
+    model.compile(optimizer=Adam(lr), loss="categorical_crossentropy", metrics=["accuracy"])
+    history = model.fit(X_train, Y_train, validation_data=(X_val, Y_val),
+        epochs=epochs, batch_size=batch_size,
+        callbacks=[EarlyStopping(patience=5, restore_best_weights=True, monitor="val_loss")],
+        verbose=0)
+    return model, categories, history
 
 # ============================================================
 # SIDEBAR
@@ -356,20 +401,63 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "\U0001f4c8 History", "\u2139\ufe0f Panduan"
 ])
 
-# ===================== TAB 1 =====================
+# ===================== TAB 1: KLASIFIKASI =====================
 with tab1:
     st.markdown("## \U0001f50d Klasifikasi Gambar")
-    input_method = st.radio("Input:", ["Upload", "Kamera", "URL"], horizontal=True)
+    input_method = st.radio("Input:", ["Upload", "Kamera (Snapshot)", "\U0001f534 Kamera Real-Time", "URL"], horizontal=True, key="input_method")
 
     img_input = None
+
     if input_method == "Upload":
         uploaded = st.file_uploader("Pilih gambar:", type=["png","jpg","jpeg","bmp","webp","tiff"], key="main_upload")
         if uploaded:
             img_input = Image.open(uploaded).convert("RGB")
-    elif input_method == "Kamera":
+
+    elif input_method == "Kamera (Snapshot)":
         cam = st.camera_input("Ambil foto")
         if cam:
             img_input = Image.open(cam).convert("RGB")
+
+    elif input_method == "\U0001f534 Kamera Real-Time":
+        st.markdown("""<div class="info-box">
+        <b>\U0001f534 Mode Real-Time:</b> Kamera akan otomatis mengklasifikasi secara terus-menerus.
+        Centang <b>Aktifkan Real-Time</b> untuk mulai.
+        </div>""", unsafe_allow_html=True)
+
+        live_active = st.checkbox("\U0001f534 Aktifkan Real-Time Klasifikasi", key="live_toggle")
+
+        if live_active:
+            if HAS_LIVE_CAM:
+                live_frame = camera_input_live(key="live_cls_cam")
+            else:
+                live_frame = st.camera_input("\U0001f4f7 Frame (retake untuk update)", key="live_fallback_cam")
+
+            if live_frame is not None:
+                img_pil = Image.open(live_frame).convert("RGB")
+                col_cam, col_res = st.columns([1, 1])
+                with col_cam:
+                    st.image(img_pil, caption="Live Feed", width="stretch")
+                with col_res:
+                    with st.spinner("Klasifikasi..."):
+                        t0 = time.time()
+                        results = classify_single(img_pil, class_mode, model_choice, custom_cats, top_k, confidence_threshold)
+                        elapsed = time.time() - t0
+                    if results:
+                        best = results[0]
+                        mode_label = "Custom" if class_mode == "Custom Model (.h5)" else model_choice.split("(")[0].strip()
+                        st.markdown(f'<div class="result-card"><h2>\U0001f3af {best["label"]}</h2><h3>{best["confidence"]*100:.1f}%</h3><p>{mode_label} \u2022 {elapsed:.2f}s</p></div>', unsafe_allow_html=True)
+                        for i, r in enumerate(results[:5]):
+                            emoji = ["\U0001f947", "\U0001f948", "\U0001f949"][i] if i < 3 else f"#{i+1}"
+                            st.progress(min(r["confidence"], 1.0), text=f"{emoji} {r['label']} \u2014 {r['confidence']*100:.1f}%")
+
+                        st.session_state.classification_history.append({
+                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "model": mode_label, "top_prediction": best["label"],
+                            "confidence": best["confidence"], "all_predictions": results,
+                            "elapsed": elapsed,
+                        })
+        img_input = None
+
     else:
         url = st.text_input("URL:", placeholder="https://example.com/image.jpg")
         if url:
@@ -491,110 +579,263 @@ with tab2:
 # ===================== TAB 3: TRAINING =====================
 with tab3:
     st.markdown("## \U0001f3eb Training Custom Model")
-    st.markdown("""<div class="info-box">
-    <b>Cara:</b> Siapkan ZIP berisi sub-folder per kategori (misal: <code>daisy/*.jpg</code>, <code>rose/*.jpg</code>).
-    Upload \u2192 pilih parameter \u2192 Train! \u2192 Download model.
-    </div>""", unsafe_allow_html=True)
 
-    train_zip = st.file_uploader("Dataset (ZIP):", type=["zip"], key="train_zip")
+    train_source = st.radio("Sumber Data Training:",
+        ["\U0001f4c1 Upload ZIP", "\U0001f4f7 Ambil Foto dari Kamera"],
+        horizontal=True, key="train_source")
 
-    if train_zip:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            zip_path = os.path.join(tmpdir, "dataset.zip")
-            with open(zip_path, "wb") as fw:
-                fw.write(train_zip.read())
-            import zipfile as zf_mod
-            with zf_mod.ZipFile(zip_path, "r") as z:
-                z.extractall(tmpdir)
+    # ---- SOURCE A: ZIP UPLOAD ----
+    if train_source == "\U0001f4c1 Upload ZIP":
+        st.markdown("""<div class="info-box">
+        <b>Cara:</b> Siapkan ZIP berisi sub-folder per kategori (misal: <code>daisy/*.jpg</code>, <code>rose/*.jpg</code>).
+        </div>""", unsafe_allow_html=True)
 
-            data_root = tmpdir
-            subdirs = [d for d in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, d)) and not d.startswith(("__","."))]
-            if len(subdirs) == 1:
-                inner = os.path.join(data_root, subdirs[0])
-                inner_subs = [d for d in os.listdir(inner) if os.path.isdir(os.path.join(inner, d)) and not d.startswith(("__","."))]
-                if len(inner_subs) > 1:
-                    data_root = inner
-                    subdirs = inner_subs
+        train_zip = st.file_uploader("Dataset (ZIP):", type=["zip"], key="train_zip")
 
-            categories = sorted(subdirs)
-            img_counts = {}
-            for cat in categories:
-                cat_path = os.path.join(data_root, cat)
-                img_counts[cat] = len([f for f in os.listdir(cat_path) if f.lower().endswith((".jpg",".jpeg",".png",".bmp",".webp"))])
+        if train_zip:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                zip_path = os.path.join(tmpdir, "dataset.zip")
+                with open(zip_path, "wb") as fw:
+                    fw.write(train_zip.read())
+                import zipfile as zf_mod
+                with zf_mod.ZipFile(zip_path, "r") as z:
+                    z.extractall(tmpdir)
 
-            st.success(f"**{len(categories)}** kategori, **{sum(img_counts.values())}** gambar")
-            if HAS_PD:
-                st.dataframe(pd.DataFrame({"Kategori": categories, "Jumlah": [img_counts[c] for c in categories]}), use_container_width=True)
+                data_root = tmpdir
+                subdirs = [d for d in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, d)) and not d.startswith(("__","."))]
+                if len(subdirs) == 1:
+                    inner = os.path.join(data_root, subdirs[0])
+                    inner_subs = [d for d in os.listdir(inner) if os.path.isdir(os.path.join(inner, d)) and not d.startswith(("__","."))]
+                    if len(inner_subs) > 1:
+                        data_root = inner
+                        subdirs = inner_subs
 
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                base_model = st.selectbox("Base Model:", list(PRETRAINED_MODELS.keys()), key="train_base")
-            with c2:
-                epochs = st.slider("Epochs:", 1, 50, 10)
-                batch_size = st.selectbox("Batch:", [8, 16, 32], index=1)
-            with c3:
-                lr = st.select_slider("LR:", [0.0001, 0.0005, 0.001, 0.005], value=0.001)
-                freeze = st.checkbox("Freeze base", value=True)
-            val_split = st.slider("Val Split:", 0.1, 0.4, 0.2, 0.05)
-            augment = st.checkbox("Augmentation", value=True)
+                categories = sorted(subdirs)
+                img_counts = {}
+                for cat in categories:
+                    cat_path = os.path.join(data_root, cat)
+                    img_counts[cat] = len([f for f in os.listdir(cat_path) if f.lower().endswith((".jpg",".jpeg",".png",".bmp",".webp"))])
 
-            if st.button("\U0001f3cb\ufe0f Train!", type="primary", key="train_btn"):
-                info = PRETRAINED_MODELS[base_model]
-                target_size = info["size"]
-                prog_bar = st.progress(0)
-                status_text = st.empty()
+                st.success(f"**{len(categories)}** kategori, **{sum(img_counts.values())}** gambar")
+                if HAS_PD:
+                    st.dataframe(pd.DataFrame({"Kategori": categories, "Jumlah": [img_counts[c] for c in categories]}), use_container_width=True)
 
-                status_text.text("Mempersiapkan data...")
-                if augment:
-                    gen = keras.preprocessing.image.ImageDataGenerator(
-                        preprocessing_function=info["preprocess"], validation_split=val_split,
-                        rotation_range=30, width_shift_range=0.2, height_shift_range=0.2,
-                        shear_range=0.2, zoom_range=0.2, horizontal_flip=True, fill_mode="nearest")
-                else:
-                    gen = keras.preprocessing.image.ImageDataGenerator(
-                        preprocessing_function=info["preprocess"], validation_split=val_split)
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    base_model = st.selectbox("Base Model:", list(PRETRAINED_MODELS.keys()), key="train_base")
+                with c2:
+                    epochs = st.slider("Epochs:", 1, 50, 10, key="zip_epochs")
+                    batch_size = st.selectbox("Batch:", [8, 16, 32], index=1, key="zip_batch")
+                with c3:
+                    lr = st.select_slider("LR:", [0.0001, 0.0005, 0.001, 0.005], value=0.001, key="zip_lr")
+                    freeze = st.checkbox("Freeze base", value=True, key="zip_freeze")
+                val_split = st.slider("Val Split:", 0.1, 0.4, 0.2, 0.05, key="zip_val")
+                augment = st.checkbox("Augmentation", value=True, key="zip_aug")
 
-                train_data = gen.flow_from_directory(data_root, target_size=target_size, batch_size=batch_size,
-                    class_mode="categorical", subset="training", shuffle=True)
-                val_data = gen.flow_from_directory(data_root, target_size=target_size, batch_size=batch_size,
-                    class_mode="categorical", subset="validation", shuffle=False)
+                if st.button("\U0001f3cb\ufe0f Train!", type="primary", key="train_btn"):
+                    info = PRETRAINED_MODELS[base_model]
+                    target_size = info["size"]
+                    prog_bar = st.progress(0)
+                    status_text = st.empty()
 
-                num_classes = len(train_data.class_indices)
-                class_names = list(train_data.class_indices.keys())
+                    status_text.text("Mempersiapkan data...")
+                    if augment:
+                        gen = keras.preprocessing.image.ImageDataGenerator(
+                            preprocessing_function=info["preprocess"], validation_split=val_split,
+                            rotation_range=30, width_shift_range=0.2, height_shift_range=0.2,
+                            shear_range=0.2, zoom_range=0.2, horizontal_flip=True, fill_mode="nearest")
+                    else:
+                        gen = keras.preprocessing.image.ImageDataGenerator(
+                            preprocessing_function=info["preprocess"], validation_split=val_split)
 
-                status_text.text("Building model...")
-                model = build_transfer_model(base_model, num_classes, freeze)
-                model.compile(optimizer=Adam(lr), loss="categorical_crossentropy", metrics=["accuracy"])
+                    train_data = gen.flow_from_directory(data_root, target_size=target_size, batch_size=batch_size,
+                        class_mode="categorical", subset="training", shuffle=True)
+                    val_data = gen.flow_from_directory(data_root, target_size=target_size, batch_size=batch_size,
+                        class_mode="categorical", subset="validation", shuffle=False)
 
-                class SLCB(keras.callbacks.Callback):
-                    def on_epoch_end(self, epoch, logs=None):
-                        prog_bar.progress((epoch + 1) / epochs)
-                        status_text.text(f"Epoch {epoch+1}/{epochs} \u2014 acc: {logs.get('accuracy',0):.4f} \u2014 val_acc: {logs.get('val_accuracy',0):.4f}")
+                    num_classes = len(train_data.class_indices)
+                    class_names = list(train_data.class_indices.keys())
 
-                history = model.fit(train_data, validation_data=val_data, epochs=epochs,
-                    callbacks=[SLCB(), EarlyStopping(patience=5, restore_best_weights=True, monitor="val_loss")], verbose=0)
+                    status_text.text("Building model...")
+                    model = build_transfer_model(base_model, num_classes, freeze)
+                    model.compile(optimizer=Adam(lr), loss="categorical_crossentropy", metrics=["accuracy"])
 
-                prog_bar.progress(1.0)
-                status_text.text("Selesai!")
+                    class SLCB(keras.callbacks.Callback):
+                        def on_epoch_end(self, epoch, logs=None):
+                            prog_bar.progress((epoch + 1) / epochs)
+                            status_text.text(f"Epoch {epoch+1}/{epochs} \u2014 acc: {logs.get('accuracy',0):.4f} \u2014 val_acc: {logs.get('val_accuracy',0):.4f}")
 
-                with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
-                    model.save(tmp.name)
-                    with open(tmp.name, "rb") as mf:
-                        model_bytes = mf.read()
+                    history = model.fit(train_data, validation_data=val_data, epochs=epochs,
+                        callbacks=[SLCB(), EarlyStopping(patience=5, restore_best_weights=True, monitor="val_loss")], verbose=0)
 
-                labels_str = "\n".join(class_names)
-                final_acc = history.history["accuracy"][-1]
-                final_val = history.history.get("val_accuracy", [0])[-1]
+                    prog_bar.progress(1.0)
+                    status_text.text("Selesai!")
 
-                st.session_state.custom_model = model
-                st.session_state.custom_categories = class_names
-                st.session_state.trained_model_bytes = model_bytes
-                st.session_state.trained_labels_str = labels_str
-                st.session_state.trained_history = history.history
-                st.session_state.trained_acc = final_acc
-                st.session_state.trained_val_acc = final_val
+                    with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
+                        model.save(tmp.name)
+                        with open(tmp.name, "rb") as mf:
+                            model_bytes = mf.read()
+
+                    labels_str = "\n".join(class_names)
+                    final_acc = history.history["accuracy"][-1]
+                    final_val = history.history.get("val_accuracy", [0])[-1]
+
+                    st.session_state.custom_model = model
+                    st.session_state.custom_categories = class_names
+                    st.session_state.trained_model_bytes = model_bytes
+                    st.session_state.trained_labels_str = labels_str
+                    st.session_state.trained_history = history.history
+                    st.session_state.trained_acc = final_acc
+                    st.session_state.trained_val_acc = final_val
+                    st.rerun()
+
+    # ---- SOURCE B: CAMERA CAPTURE ----
+    else:
+        st.markdown("""<div class="info-box">
+        <b>\U0001f4f7 Cara:</b> Tentukan nama kategori, lalu ambil foto per kategori menggunakan kamera.
+        Setiap foto yang diambil otomatis tersimpan. Setelah cukup, klik <b>Train!</b>
+        </div>""", unsafe_allow_html=True)
+
+        st.markdown("### \U0001f3f7\ufe0f Atur Kategori")
+        num_cats = st.number_input("Jumlah kategori:", min_value=2, max_value=20, value=len(st.session_state.cam_training_categories), key="num_cam_cats")
+        while len(st.session_state.cam_training_categories) < num_cats:
+            st.session_state.cam_training_categories.append(f"Kategori_{len(st.session_state.cam_training_categories)+1}")
+        while len(st.session_state.cam_training_categories) > num_cats:
+            st.session_state.cam_training_categories.pop()
+
+        cat_cols = st.columns(min(num_cats, 4))
+        for i in range(num_cats):
+            with cat_cols[i % min(num_cats, 4)]:
+                new_name = st.text_input(f"Kategori {i+1}:", value=st.session_state.cam_training_categories[i], key=f"cat_name_{i}")
+                st.session_state.cam_training_categories[i] = new_name
+
+        st.markdown("---")
+        st.markdown("### \U0001f4f8 Ambil Foto per Kategori")
+        st.caption("Pilih kategori, lalu ambil foto. Setiap klik tombol kamera = 1 foto tersimpan.")
+
+        active_cat = st.selectbox("Kategori aktif untuk capture:",
+            st.session_state.cam_training_categories, key="active_capture_cat")
+
+        if active_cat not in st.session_state.cam_training_data:
+            st.session_state.cam_training_data[active_cat] = []
+
+        cap_method = st.radio("Metode capture:", ["Snapshot (Klik)", "Continuous (Live)"], horizontal=True, key="cap_method")
+
+        if cap_method == "Snapshot (Klik)":
+            cam_photo = st.camera_input(f"\U0001f4f7 Foto untuk \"{active_cat}\"", key=f"cam_cap_{active_cat}")
+            if cam_photo:
+                img = Image.open(cam_photo).convert("RGB")
+                st.session_state.cam_training_data[active_cat].append(img)
+                st.success(f"\u2705 Foto ditambahkan ke \"{active_cat}\" ({len(st.session_state.cam_training_data[active_cat])} total)")
+        else:
+            if HAS_LIVE_CAM:
+                st.markdown(f'**\U0001f534 Live capture aktif untuk: `{active_cat}`**')
+                live_img = camera_input_live(key="live_train_cam")
+                if live_img is not None:
+                    img = Image.open(live_img).convert("RGB")
+                    st.image(img, caption="Preview", width="stretch")
+                    if st.button(f"\U0001f4be Simpan frame ini ke \"{active_cat}\"", type="primary", key="save_live_frame"):
+                        st.session_state.cam_training_data[active_cat].append(img)
+                        st.success(f"\u2705 Tersimpan! ({len(st.session_state.cam_training_data[active_cat])} total)")
+                        st.rerun()
+            else:
+                st.warning("Install `streamlit-camera-input-live` untuk live capture. Gunakan mode Snapshot.")
+                cam_photo = st.camera_input(f"\U0001f4f7 Foto untuk \"{active_cat}\" (retake = foto baru)", key=f"cam_live_fb_{active_cat}")
+                if cam_photo:
+                    img = Image.open(cam_photo).convert("RGB")
+                    st.session_state.cam_training_data[active_cat].append(img)
+                    st.success(f"\u2705 Foto ditambahkan ({len(st.session_state.cam_training_data[active_cat])} total)")
+
+        # Upload tambahan
+        extra_files = st.file_uploader(f"Atau upload file ke \"{active_cat}\":",
+            type=["png","jpg","jpeg","bmp","webp"], accept_multiple_files=True, key=f"extra_upload_{active_cat}")
+        if extra_files:
+            for ef in extra_files:
+                img = Image.open(ef).convert("RGB")
+                st.session_state.cam_training_data[active_cat].append(img)
+            st.success(f"+{len(extra_files)} gambar ditambahkan ke \"{active_cat}\"")
+
+        # Dataset summary
+        st.markdown("---")
+        st.markdown("### \U0001f4ca Dataset Summary")
+        total_imgs = 0
+        summary_data = []
+        for cat in st.session_state.cam_training_categories:
+            count = len(st.session_state.cam_training_data.get(cat, []))
+            total_imgs += count
+            summary_data.append({"Kategori": cat, "Jumlah Foto": count})
+
+        if HAS_PD:
+            st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
+        st.markdown(f"**Total: {total_imgs} gambar**")
+
+        # Preview thumbnails
+        for cat in st.session_state.cam_training_categories:
+            imgs = st.session_state.cam_training_data.get(cat, [])
+            if imgs:
+                with st.expander(f"\U0001f5bc\ufe0f {cat} ({len(imgs)} foto)", expanded=False):
+                    preview_cols = st.columns(min(len(imgs), 6))
+                    for j, im in enumerate(imgs[:6]):
+                        with preview_cols[j]:
+                            st.image(im, caption=f"#{j+1}", width="stretch")
+                    if len(imgs) > 6:
+                        st.caption(f"... dan {len(imgs)-6} lainnya")
+                    if st.button(f"\U0001f5d1\ufe0f Hapus semua foto {cat}", key=f"del_cat_{cat}"):
+                        st.session_state.cam_training_data[cat] = []
+                        st.rerun()
+
+        # Clear all
+        if total_imgs > 0:
+            if st.button("\U0001f5d1\ufe0f Hapus Semua Data", key="clear_all_cam"):
+                st.session_state.cam_training_data = {}
                 st.rerun()
 
+        # Train from camera data
+        st.markdown("---")
+        st.markdown("### \U0001f3cb\ufe0f Training")
+
+        valid_cats = {cat: imgs for cat, imgs in st.session_state.cam_training_data.items() if len(imgs) >= 2}
+        if len(valid_cats) < 2:
+            st.warning("Minimal **2 kategori** dengan masing-masing **\u2265 2 foto** untuk mulai training.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                cam_base = st.selectbox("Base Model:", list(PRETRAINED_MODELS.keys()), key="cam_base")
+            with c2:
+                cam_epochs = st.slider("Epochs:", 1, 50, 10, key="cam_epochs")
+                cam_batch = st.selectbox("Batch:", [4, 8, 16, 32], index=1, key="cam_batch")
+            with c3:
+                cam_lr = st.select_slider("LR:", [0.0001, 0.0005, 0.001, 0.005], value=0.001, key="cam_lr")
+                cam_freeze = st.checkbox("Freeze base", value=True, key="cam_freeze")
+
+            if st.button("\U0001f680 Train dari Foto Kamera!", type="primary", key="cam_train_btn"):
+                with st.spinner("Training model dari foto kamera..."):
+                    prog = st.progress(0)
+                    prog.progress(10)
+                    model, class_names, history = train_from_images(
+                        valid_cats, cam_base, cam_epochs, cam_batch, cam_lr, cam_freeze, False)
+                    prog.progress(90)
+
+                    with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
+                        model.save(tmp.name)
+                        with open(tmp.name, "rb") as mf:
+                            model_bytes = mf.read()
+
+                    labels_str = "\n".join(class_names)
+                    final_acc = history.history["accuracy"][-1]
+                    final_val = history.history.get("val_accuracy", [0])[-1]
+
+                    st.session_state.custom_model = model
+                    st.session_state.custom_categories = class_names
+                    st.session_state.trained_model_bytes = model_bytes
+                    st.session_state.trained_labels_str = labels_str
+                    st.session_state.trained_history = history.history
+                    st.session_state.trained_acc = final_acc
+                    st.session_state.trained_val_acc = final_val
+                    prog.progress(100)
+                st.rerun()
+
+    # PERSISTENT TRAINING RESULTS
     if st.session_state.trained_model_bytes is not None:
         st.markdown("---")
         st.markdown("### \u2705 Training Results")
@@ -626,7 +867,7 @@ with tab3:
             st.download_button("\U0001f4be Download Labels (.txt)", st.session_state.trained_labels_str,
                 "labels.txt", "text/plain", use_container_width=True, key="dl_labels")
         with dl3:
-            if st.button("\U0001f5d1\ufe0f Clear", key="clear_train"):
+            if st.button("\U0001f5d1\ufe0f Clear Results", key="clear_train"):
                 st.session_state.trained_model_bytes = None
                 st.session_state.trained_labels_str = None
                 st.session_state.trained_history = None
@@ -680,6 +921,19 @@ with tab5:
 2. Klik **Klasifikasi Sekarang!**
 3. Lihat hasil prediksi + confidence
 
+### \U0001f534 Real-Time Klasifikasi
+1. Pilih **\U0001f534 Kamera Real-Time** di tab Klasifikasi
+2. Centang **Aktifkan Real-Time**
+3. Kamera akan otomatis mengklasifikasi setiap frame
+
+### \U0001f4f7 Training dari Kamera
+1. Buka tab **Training** \u2192 pilih **Ambil Foto dari Kamera**
+2. Tentukan nama-nama kategori
+3. Pilih kategori aktif \u2192 ambil foto (snapshot atau live)
+4. Bisa juga upload file tambahan per kategori
+5. Setelah cukup data (\u2265 2 foto/kategori, \u2265 2 kategori) \u2192 klik **Train!**
+6. Model otomatis tersimpan, langsung pakai di Klasifikasi & Batch
+
 ### \U0001f916 Model
 
 | Model | Ukuran | Kecepatan | Akurasi | Cocok Untuk |
@@ -696,14 +950,9 @@ with tab5:
 - **Preset** \u2014 Bunga, tulang belakang, X-Ray paru, hewan, buah, kendaraan, digit
 - **Custom Model** \u2014 Upload `.h5` atau latih di tab Training
 
-### \U0001f3eb Training
-1. ZIP folder dengan sub-folder per kategori
-2. Upload \u2192 pilih parameter \u2192 Train
-3. Download model `.h5` + `labels.txt`
-
 ### \U0001f525 Grad-CAM
 Area **merah/kuning** = bagian gambar yang paling mempengaruhi keputusan AI
     """)
 
 st.markdown("---")
-st.markdown('<div style="text-align:center;color:#888;font-size:0.85rem">\U0001f9e0 AI Image Classifier \u2022 TensorFlow \u2022 Transfer Learning \u2022 Grad-CAM</div>', unsafe_allow_html=True)
+st.markdown('<div style="text-align:center;color:#888;font-size:0.85rem">\U0001f9e0 AI Image Classifier \u2022 TensorFlow \u2022 Transfer Learning \u2022 Real-Time \u2022 Grad-CAM</div>', unsafe_allow_html=True)
