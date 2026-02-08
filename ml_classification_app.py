@@ -4,7 +4,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import warnings, io, json, time, inspect
+import warnings, io, json, time, inspect, math
 from datetime import datetime
 
 from sklearn.preprocessing import (StandardScaler, MinMaxScaler, RobustScaler,
@@ -96,6 +96,45 @@ def parse_hidden_layers(s):
     s=str(s).strip().replace("(","").replace(")","").replace(" ","")
     return tuple(int(x) for x in s.split(",") if x.strip())
 
+# ========== NEW: TUNING WIDGET — multiselect for categorical, multi-value for numeric ==========
+def render_tuning_widget(hp_name, hp_cfg, model_name, col):
+    """Render widget that allows selecting MULTIPLE values for HP tuning grid."""
+    key=f"tune_{model_name}_{hp_name}";t=hp_cfg["type"]
+    with col:
+        if t=="select":
+            opts=hp_cfg["options"]
+            dv=hp_cfg["default"]
+            defaults=[dv] if dv in opts else [opts[0]]
+            chosen=st.multiselect(f"{hp_name}",opts,default=defaults,key=key)
+            if not chosen: chosen=[dv if dv in opts else opts[0]]
+            if hp_name=="hidden_layer_sizes": return [parse_hidden_layers(o) for o in chosen]
+            return chosen
+        elif t=="int":
+            lo=hp_cfg["min"];hi=hp_cfg["max"];dv=hp_cfg["default"]
+            st.write(f"**{hp_name}** (range: {lo}–{hi})")
+            vals_str=st.text_input(f"Values (comma-sep):",value=str(dv),key=key)
+            try: return sorted(set([int(x.strip()) for x in vals_str.split(",") if x.strip()]))
+            except: return [dv]
+        elif t=="int_none":
+            lo=hp_cfg["min"];hi=hp_cfg["max"]
+            st.write(f"**{hp_name}** (range: {lo}–{hi}, or None)")
+            vals_str=st.text_input(f"Values (comma-sep, use None):",value="None",key=key)
+            result=[]
+            for x in vals_str.split(","):
+                x=x.strip()
+                if x.lower()=="none": result.append(None)
+                else:
+                    try: result.append(int(x))
+                    except: pass
+            return result if result else [None]
+        elif t in ["float","float_log"]:
+            lo=hp_cfg["min"];hi=hp_cfg["max"];dv=hp_cfg["default"]
+            st.write(f"**{hp_name}** (range: {lo}–{hi})")
+            vals_str=st.text_input(f"Values (comma-sep):",value=str(round(dv,6)),key=key)
+            try: return sorted(set([float(x.strip()) for x in vals_str.split(",") if x.strip()]))
+            except: return [dv]
+
+# Single-value widget for non-tuning mode
 def render_hp_widget(hp_name, hp_cfg, model_name, col):
     key=f"hp_{model_name}_{hp_name}";t=hp_cfg["type"]
     with col:
@@ -105,7 +144,7 @@ def render_hp_widget(hp_name, hp_cfg, model_name, col):
             return st.number_input(hp_name,min_value=hp_cfg["min"],max_value=hp_cfg["max"],value=hp_cfg.get("default",10) or 10,step=1,key=key)
         elif t=="float": return st.number_input(hp_name,min_value=float(hp_cfg["min"]),max_value=float(hp_cfg["max"]),value=float(hp_cfg["default"]),format="%.4f",key=key)
         elif t=="float_log":
-            import math;lo=math.log10(max(hp_cfg["min"],1e-15));hi=math.log10(max(hp_cfg["max"],1e-15));df=math.log10(max(hp_cfg["default"],1e-15))
+            lo=math.log10(max(hp_cfg["min"],1e-15));hi=math.log10(max(hp_cfg["max"],1e-15));df=math.log10(max(hp_cfg["default"],1e-15))
             return 10**st.slider(hp_name,lo,hi,df,step=0.1,format="%.2f",key=key)
         elif t=="select":
             opts=hp_cfg["options"];dv=hp_cfg["default"];idx=opts.index(dv) if dv in opts else 0
@@ -304,21 +343,35 @@ with tab3:
     else: dm=["Logistic Regression","Random Forest","SVM (RBF)","KNN","Gradient Boosting"]
     selected=st.multiselect("Models:",all_mn,default=[m for m in dm if m in all_mn])
     if selected:
-        st.markdown("### HP Tuning")
-        use_tuning=st.checkbox("Enable HP Tuning",value=False)
+        st.markdown("### Hyperparameter Tuning")
+        use_tuning=st.checkbox("Enable HP Tuning (Grid/Random Search)",value=False)
         tune_method="none";tune_cv=5;tune_scoring="accuracy";tune_niter=20
         if use_tuning:
+            st.markdown('<div class="info-box"><b>\U0001f4a1 Tips:</b> Select <b>multiple values</b> for each hyperparameter. The tuner will try all combinations to find the best one! For numeric params, enter comma-separated values (e.g. <code>0.01, 0.1, 1.0</code>).</div>',unsafe_allow_html=True)
             tune_method=st.selectbox("Method:",["RandomizedSearchCV","GridSearchCV"])
             tune_cv=st.slider("Tuning CV:",2,10,5)
             tune_scoring=st.selectbox("Scoring:",["accuracy","f1_weighted","precision_weighted","recall_weighted"])
             if tune_method=="RandomizedSearchCV": tune_niter=st.slider("N iter:",5,200,20)
+        # --- Per-model HP config ---
+        tune_grids={}
         for mname in selected:
             with st.expander(f"\u2699\ufe0f {mname}",expanded=False):
                 mreg=MODEL_REGISTRY[mname];hp_grid=mreg["hp"]
                 hp_names=list(hp_grid.keys());ncols=min(3,len(hp_names));cols=st.columns(ncols)
-                hp_vals={}
-                for i,hp in enumerate(hp_names): hp_vals[hp]=render_hp_widget(hp,hp_grid[hp],mname,cols[i%ncols])
-                st.session_state.hp_configs[mname]=hp_vals
+                if use_tuning:
+                    st.caption(f"\U0001f50d Select **multiple values** per param for tuning grid")
+                    hp_grid_vals={}
+                    for i,hp in enumerate(hp_names):
+                        hp_grid_vals[hp]=render_tuning_widget(hp,hp_grid[hp],mname,cols[i%ncols])
+                    tune_grids[mname]=hp_grid_vals
+                    # Show total combinations
+                    combos=1
+                    for v in hp_grid_vals.values(): combos*=max(1,len(v))
+                    st.info(f"\U0001f4ca Total combinations: **{combos}** (x {tune_cv} folds = {combos*tune_cv} fits)")
+                else:
+                    hp_vals={}
+                    for i,hp in enumerate(hp_names): hp_vals[hp]=render_hp_widget(hp,hp_grid[hp],mname,cols[i%ncols])
+                    st.session_state.hp_configs[mname]=hp_vals
         eval_cv=st.slider("Eval CV:",2,20,5,key="ecv")
         if st.button("\U0001f680 Train All",type="primary",use_container_width=True):
             X_tr=st.session_state.X_train;X_te=st.session_state.X_test
@@ -328,33 +381,32 @@ with tab3:
             for mi,mname in enumerate(selected):
                 status.text(f"Training {mname} ({mi+1}/{len(selected)})...")
                 try:
-                    mreg=MODEL_REGISTRY[mname];hp=st.session_state.hp_configs.get(mname,{}).copy()
-                    if "hidden_layer_sizes" in hp and isinstance(hp["hidden_layer_sizes"],str): hp["hidden_layer_sizes"]=parse_hidden_layers(hp["hidden_layer_sizes"])
+                    mreg=MODEL_REGISTRY[mname]
                     valid_p=set(inspect.signature(mreg["class"].__init__).parameters.keys())-{"self"}
-                    hp_clean={k:v for k,v in hp.items() if k in valid_p}
-                    for dk,dv in mreg["default"].items():
-                        if dk not in hp_clean and dk in valid_p: hp_clean[dk]=dv
                     t0=time.time()
-                    if use_tuning and tune_method!="none":
-                        import math as _m
+                    if use_tuning and tune_method!="none" and mname in tune_grids:
+                        # Build param grid from user multiselect
                         pg={}
-                        for hk,hcfg in mreg["hp"].items():
+                        for hk,hvals in tune_grids[mname].items():
                             if hk not in valid_p: continue
-                            if hcfg["type"]=="select":
-                                if hk=="hidden_layer_sizes": pg[hk]=[parse_hidden_layers(o) for o in hcfg["options"]]
-                                else: pg[hk]=hcfg["options"]
-                            elif hcfg["type"]=="int": pg[hk]=sorted(set([hcfg["min"],(hcfg["min"]+hcfg["max"])//2,hcfg["max"]]))
-                            elif hcfg["type"]=="int_none": pg[hk]=[None,hcfg["min"],(hcfg["min"]+hcfg["max"])//2]
-                            elif hcfg["type"] in ["float","float_log"]:
-                                lo=hcfg["min"];hi=hcfg["max"];mid=_m.sqrt(lo*hi) if lo>0 and hi>0 else (lo+hi)/2
-                                pg[hk]=sorted(set([lo,mid,hi]))
+                            if isinstance(hvals,list) and len(hvals)>0: pg[hk]=hvals
                         base_p={dk:dv for dk,dv in mreg["default"].items() if dk in valid_p}
                         base=mreg["class"](**base_p)
-                        if tune_method=="RandomizedSearchCV": search=RandomizedSearchCV(base,pg,n_iter=min(tune_niter,30),cv=tune_cv,scoring=tune_scoring,random_state=42,n_jobs=-1,error_score=0)
-                        else: search=GridSearchCV(base,pg,cv=tune_cv,scoring=tune_scoring,n_jobs=-1,error_score=0)
-                        search.fit(X_tr,y_tr);model=search.best_estimator_;hp_clean=search.best_params_
+                        if tune_method=="RandomizedSearchCV":
+                            total_c=1
+                            for v in pg.values(): total_c*=len(v)
+                            n_it=min(tune_niter,total_c)
+                            search=RandomizedSearchCV(base,pg,n_iter=n_it,cv=tune_cv,scoring=tune_scoring,random_state=42,n_jobs=-1,error_score=0)
+                        else:
+                            search=GridSearchCV(base,pg,cv=tune_cv,scoring=tune_scoring,n_jobs=-1,error_score=0)
+                        search.fit(X_tr,y_tr);model=search.best_estimator_;best_params=search.best_params_;best_score=search.best_score_
                     else:
-                        model=mreg["class"](**hp_clean);model.fit(X_tr,y_tr)
+                        hp=st.session_state.hp_configs.get(mname,{}).copy()
+                        if "hidden_layer_sizes" in hp and isinstance(hp["hidden_layer_sizes"],str): hp["hidden_layer_sizes"]=parse_hidden_layers(hp["hidden_layer_sizes"])
+                        hp_clean={k:v for k,v in hp.items() if k in valid_p}
+                        for dk,dv in mreg["default"].items():
+                            if dk not in hp_clean and dk in valid_p: hp_clean[dk]=dv
+                        model=mreg["class"](**hp_clean);model.fit(X_tr,y_tr);best_params=hp_clean;best_score=None
                     train_time=time.time()-t0;y_pred=model.predict(X_te)
                     y_prob=None
                     if hasattr(model,"predict_proba"):
@@ -366,8 +418,9 @@ with tab3:
                     try: cv_sc=cross_val_score(model,X_tr,y_tr,cv=min(eval_cv,len(np.unique(y_tr))),scoring="accuracy")
                     except: cv_sc=np.array([0.0])
                     metrics=safe_metric(y_te,y_pred,y_prob,avg,n_cls)
-                    metrics.update({"cv_mean":cv_sc.mean(),"cv_std":cv_sc.std(),"train_time":train_time,"model_name":mname,"params":str(hp_clean)})
-                    results[mname]=metrics;all_preds[mname]={"y_pred":y_pred,"y_prob":y_prob,"model":model};trained[mname]=model
+                    metrics.update({"cv_mean":cv_sc.mean(),"cv_std":cv_sc.std(),"train_time":train_time,"model_name":mname,
+                        "best_params":str(best_params),"tuning_best_score":best_score if best_score else float("nan")})
+                    results[mname]=metrics;all_preds[mname]={"y_pred":y_pred,"y_prob":y_prob,"model":model,"best_params":best_params};trained[mname]=model
                 except Exception as e: results[mname]={"model_name":mname,"accuracy":0,"error":str(e)};st.warning(f"{mname}: {e}")
                 prog.progress((mi+1)/len(selected))
             st.session_state.model_results=results;st.session_state.all_predictions=all_preds;st.session_state.trained_models=trained
@@ -375,8 +428,18 @@ with tab3:
             if len(comp)>0: comp=comp.sort_values("accuracy",ascending=False)
             st.session_state.comparison_df=comp;prog.empty();status.empty()
             st.success(f"\u2705 {len(comp)} models trained!")
+            # ===== SHOW BEST MODEL + PARAMS =====
             if len(comp)>0:
-                b=comp.iloc[0];st.markdown(f'<div class="success-box"><b>\U0001f3c6 Best: {b["model_name"]}</b> Acc={b["accuracy"]:.4f} F1={b.get("f1",0):.4f}</div>',unsafe_allow_html=True)
+                best=comp.iloc[0]
+                st.markdown(f'<div class="success-box"><b>\U0001f3c6 Best: {best["model_name"]}</b> | Acc={best["accuracy"]:.4f} | F1={best.get("f1",0):.4f}</div>',unsafe_allow_html=True)
+                st.markdown("### \U0001f3c6 Best Model Parameters")
+                for mn in comp["model_name"].tolist():
+                    bp=all_preds.get(mn,{}).get("best_params",{})
+                    ts=results.get(mn,{}).get("tuning_best_score",float("nan"))
+                    icon="\U0001f947" if mn==best["model_name"] else "\U0001f4cb"
+                    ts_str=f" | Tuning CV Score: {ts:.4f}" if not (isinstance(ts,float) and ts!=ts) else ""
+                    st.markdown(f"**{icon} {mn}**{ts_str}")
+                    st.json(bp if isinstance(bp,dict) else json.loads(str(bp).replace("'",'"')) if "'" in str(bp) else str(bp))
 
 with tab4:
     st.markdown("## Detailed Results")
@@ -392,8 +455,13 @@ with tab4:
     with c3: st.markdown(f'<div class="metric-card"><h3>Precision</h3><h2>{mr.get("precision",0):.4f}</h2></div>',unsafe_allow_html=True)
     with c4: st.markdown(f'<div class="metric-card"><h3>Recall</h3><h2>{mr.get("recall",0):.4f}</h2></div>',unsafe_allow_html=True)
     with c5: st.markdown(f'<div class="metric-card"><h3>MCC</h3><h2>{mr.get("mcc",0):.4f}</h2></div>',unsafe_allow_html=True)
+    # Show best params for this model
+    bp=mp.get("best_params",{})
+    if bp:
+        st.markdown("### Best Parameters")
+        st.json(bp if isinstance(bp,dict) else str(bp))
     st.markdown("### All Metrics")
-    mkeys=["accuracy","balanced_accuracy","precision","recall","f1","mcc","kappa","roc_auc","log_loss","cv_mean","cv_std","precision_macro","recall_macro","f1_macro","precision_micro","recall_micro","f1_micro","train_time"]
+    mkeys=["accuracy","balanced_accuracy","precision","recall","f1","mcc","kappa","roc_auc","log_loss","cv_mean","cv_std","tuning_best_score","precision_macro","recall_macro","f1_macro","precision_micro","recall_micro","f1_micro","train_time"]
     st.dataframe(pd.DataFrame([{"Metric":k,"Value":round(mr.get(k,float("nan")),6)} for k in mkeys if k in mr]),use_container_width=True)
     if "y_pred" in mp:
         cm=confusion_matrix(y_te,mp["y_pred"]);clbl=cn if len(cn)==cm.shape[0] else [str(i) for i in range(cm.shape[0])]
@@ -448,9 +516,14 @@ with tab5:
     if st.session_state.comparison_df is None or len(st.session_state.comparison_df)==0: st.warning("Train models first.");st.stop()
     comp=st.session_state.comparison_df.copy();preds=st.session_state.all_predictions;y_te=st.session_state.y_test;cn=st.session_state.class_names
     st.markdown("### Leaderboard")
-    show_c=["model_name","accuracy","balanced_accuracy","precision","recall","f1","mcc","kappa","roc_auc","log_loss","cv_mean","cv_std","train_time"]
+    show_c=["model_name","accuracy","balanced_accuracy","precision","recall","f1","mcc","kappa","roc_auc","log_loss","cv_mean","cv_std","tuning_best_score","train_time"]
     st.dataframe(comp[[c for c in show_c if c in comp.columns]].round(4),use_container_width=True)
     b=comp.iloc[0];st.markdown(f'<div class="success-box"><b>\U0001f3c6 {b["model_name"]}</b> Acc={b["accuracy"]:.4f} F1={b.get("f1",0):.4f} MCC={b.get("mcc",0):.4f}</div>',unsafe_allow_html=True)
+    # Show best params
+    bp2=preds.get(b["model_name"],{}).get("best_params",{})
+    if bp2:
+        st.markdown("**Best Params:**")
+        st.json(bp2 if isinstance(bp2,dict) else str(bp2))
     st.markdown("### Metric Bars")
     m_opts=[m for m in ["accuracy","balanced_accuracy","precision","recall","f1","mcc","kappa","roc_auc","cv_mean","train_time"] if m in comp.columns]
     sel_m=st.multiselect("Metrics:",m_opts,default=m_opts[:6],key="cmp_m")
@@ -497,6 +570,14 @@ with tab5:
     st.markdown("### Export")
     buf=io.StringIO();comp.to_csv(buf,index=False)
     st.download_button("Download CSV",buf.getvalue(),"ml_comparison.csv","text/csv",use_container_width=True)
+    # Text report
+    rpt=f"ML Classification Report\n{'='*50}\nDate: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    rpt+=f"Best: {comp.iloc[0]['model_name']} (Acc={comp.iloc[0]['accuracy']:.4f})\n\n"
+    for _,r in comp.iterrows():
+        rpt+=f"\n{r['model_name']}: Acc={r['accuracy']:.4f} F1={r.get('f1',0):.4f}\n"
+        bp3=preds.get(r['model_name'],{}).get("best_params",{})
+        if bp3: rpt+=f"  Params: {bp3}\n"
+    st.download_button("Download Report (TXT)",rpt,"ml_report.txt","text/plain",use_container_width=True,key="dl_rpt")
 
 with tab6:
     st.markdown("## \U0001f50d Deep Analysis")
@@ -526,7 +607,7 @@ with tab6:
                 except: pass
         fig_cal.add_trace(go.Scatter(x=[0,1],y=[0,1],line=dict(dash="dash",color="gray"),name="Perfect"))
         fig_cal.update_layout(title="Calibration",xaxis_title="Mean Predicted Prob",yaxis_title="Fraction Positive",height=500);st.plotly_chart(fig_cal,use_container_width=True)
-    elif nc5>2: st.info("Calibration curves for binary classification only.")
+    elif nc5>2: st.info("Calibration curves for binary only.")
     st.markdown("### Cross-Val Predictions")
     cvp_model=st.selectbox("Model:",mnames,key="cvp_m")
     if st.button("CV Predict",key="cvp_btn"):
@@ -584,4 +665,4 @@ with tab6:
             else: st.markdown(f'<div class="info-box"><b>Not significant (p={p_val:.4f})</b></div>',unsafe_allow_html=True)
 
 st.markdown("---")
-st.markdown('<div style="text-align:center;color:#888;font-size:0.85rem">ML Classification Suite v2.0</div>',unsafe_allow_html=True)
+st.markdown('<div style="text-align:center;color:#888;font-size:0.85rem">ML Classification Suite v2.1</div>',unsafe_allow_html=True)
