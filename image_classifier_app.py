@@ -3,8 +3,6 @@ import numpy as np
 import io, os, json, time, tempfile, base64
 from datetime import datetime
 from PIL import Image, ImageOps
-import streamlit.components.v1 as components
-import threading
 
 # ============================================================
 # SAFE IMPORTS
@@ -45,12 +43,11 @@ try:
 except ImportError:
     HAS_PD = False
 
-try:
-    from streamlit_webrtc import webrtc_streamer, WebRtcMode
-    import av
-    HAS_WEBRTC = True
-except ImportError:
-    HAS_WEBRTC = False
+# ============================================================
+# BIDIRECTIONAL CUSTOM COMPONENTS (auto_cam & live_cam)
+# ============================================================
+from streamlit_components.auto_cam import auto_cam
+from streamlit_components.live_cam import live_cam
 
 # ============================================================
 # PAGE CONFIG & STYLE
@@ -159,8 +156,6 @@ defaults = {
     "trained_history": None, "trained_acc": 0, "trained_val_acc": 0,
     "cam_training_data": {},
     "cam_training_categories": ["Kategori_A", "Kategori_B"],
-    "last_live_result": None,
-    "webrtc_latest_frame": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -178,6 +173,24 @@ def preprocess_image(img_pil, target_size):
     img = img_pil.convert("RGB").resize(target_size)
     arr = np.array(img).astype(np.float32)
     return np.expand_dims(arr, axis=0)
+
+def decode_data_url(data_url):
+    """Decode a single base64 data-URL to PIL Image."""
+    header, b64data = data_url.split(",", 1)
+    img_bytes = base64.b64decode(b64data)
+    return Image.open(io.BytesIO(img_bytes)).convert("RGB")
+
+def decode_data_url_list(data_urls):
+    """Decode list of base64 data-URLs to list of PIL Images."""
+    images = []
+    if not data_urls:
+        return images
+    for url in data_urls:
+        try:
+            images.append(decode_data_url(url))
+        except Exception:
+            pass
+    return images
 
 def classify_imagenet(img_pil, model_name, top_k=10):
     info = PRETRAINED_MODELS[model_name]
@@ -324,164 +337,6 @@ def train_from_images(image_dict, base_model_name, epochs, batch_size, lr, freez
     return model, categories, history
 
 # ============================================================
-# JS: Auto-capture while holding button/spacebar
-# ============================================================
-AUTO_CAPTURE_HTML = """
-<div id="autocap-root">
-  <video id="autocap-video" autoplay playsinline style="width:100%%;border-radius:10px;"></video>
-  <div style="margin:8px 0;text-align:center;">
-    <button id="autocap-btn"
-      style="padding:14px 32px;font-size:1.1rem;border:none;border-radius:8px;cursor:pointer;
-      background:linear-gradient(135deg,#667eea,#764ba2);color:white;font-weight:bold;
-      user-select:none;-webkit-user-select:none;touch-action:manipulation;">
-      \U0001f4f7 Tahan untuk Capture (atau tahan Spasi)
-    </button>
-    <span id="autocap-count" style="margin-left:12px;font-size:1rem;color:#888;">0 foto</span>
-  </div>
-  <canvas id="autocap-canvas" style="display:none;"></canvas>
-</div>
-<script>
-(function() {
-  const INTERVAL = %d;
-  const video = document.getElementById('autocap-video');
-  const btn = document.getElementById('autocap-btn');
-  const countEl = document.getElementById('autocap-count');
-  const canvas = document.getElementById('autocap-canvas');
-  let capturing = false;
-  let timer = null;
-  let count = 0;
-  let frames = [];
-
-  navigator.mediaDevices.getUserMedia({video: {facingMode: 'environment', width: {ideal: 640}, height: {ideal: 480}}})
-    .then(stream => { video.srcObject = stream; })
-    .catch(err => { btn.textContent = 'Kamera error: ' + err.message; });
-
-  function captureOne() {
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext('2d').drawImage(video, 0, 0);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
-    frames.push(dataUrl);
-    count++;
-    countEl.textContent = count + ' foto';
-    btn.style.background = 'linear-gradient(135deg,#e74c3c,#c0392b)';
-    btn.textContent = '\U0001f534 Capturing... (' + count + ')';
-  }
-
-  function startCapture() {
-    if (capturing) return;
-    capturing = true;
-    captureOne();
-    timer = setInterval(captureOne, INTERVAL);
-  }
-
-  function stopCapture() {
-    if (!capturing) return;
-    capturing = false;
-    clearInterval(timer);
-    timer = null;
-    btn.style.background = 'linear-gradient(135deg,#667eea,#764ba2)';
-    btn.textContent = '\U0001f4f7 Tahan untuk Capture (atau tahan Spasi)';
-    // Send all frames to Streamlit
-    if (frames.length > 0) {
-      window.parent.postMessage({type: 'streamlit:setComponentValue', value: JSON.stringify(frames)}, '*');
-      frames = [];
-    }
-  }
-
-  // Mouse
-  btn.addEventListener('mousedown', e => { e.preventDefault(); startCapture(); });
-  btn.addEventListener('mouseup', stopCapture);
-  btn.addEventListener('mouseleave', stopCapture);
-  // Touch
-  btn.addEventListener('touchstart', e => { e.preventDefault(); startCapture(); }, {passive:false});
-  btn.addEventListener('touchend', stopCapture);
-  btn.addEventListener('touchcancel', stopCapture);
-  // Keyboard (Spacebar)
-  document.addEventListener('keydown', e => {
-    if (e.code === 'Space' && !e.repeat) { e.preventDefault(); startCapture(); }
-  });
-  document.addEventListener('keyup', e => {
-    if (e.code === 'Space') { e.preventDefault(); stopCapture(); }
-  });
-})();
-</script>
-"""
-
-def render_auto_capture(capture_interval_ms=300, height=520, key="autocap"):
-    """Render auto-capture camera. Returns list of PIL Images or empty list."""
-    html = AUTO_CAPTURE_HTML % capture_interval_ms
-    result = components.html(html, height=height, scrolling=False)
-    return result
-
-def decode_captured_frames(raw_value):
-    """Decode base64 data URLs from JS component into PIL Images."""
-    if raw_value is None:
-        return []
-    try:
-        if isinstance(raw_value, str):
-            frame_list = json.loads(raw_value)
-        else:
-            frame_list = raw_value
-        images = []
-        for data_url in frame_list:
-            header, b64data = data_url.split(",", 1)
-            img_bytes = base64.b64decode(b64data)
-            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            images.append(img)
-        return images
-    except Exception:
-        return []
-
-# ============================================================
-# JS: Live classification camera (smooth, no lag)
-# ============================================================
-LIVE_CLASSIFY_HTML = """
-<div id="livecls-root">
-  <video id="livecls-video" autoplay playsinline style="width:100%%;border-radius:10px;"></video>
-  <canvas id="livecls-canvas" style="display:none;"></canvas>
-</div>
-<script>
-(function() {
-  const INTERVAL = %d;
-  const video = document.getElementById('livecls-video');
-  const canvas = document.getElementById('livecls-canvas');
-
-  navigator.mediaDevices.getUserMedia({video: {facingMode: 'environment', width: {ideal: 640}, height: {ideal: 480}}})
-    .then(stream => { video.srcObject = stream; })
-    .catch(err => { console.error(err); });
-
-  setInterval(() => {
-    if (video.readyState >= 2) {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      canvas.getContext('2d').drawImage(video, 0, 0);
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
-      window.parent.postMessage({type: 'streamlit:setComponentValue', value: dataUrl}, '*');
-    }
-  }, INTERVAL);
-})();
-</script>
-"""
-
-def render_live_camera(interval_ms=1500, height=400, key="livecam"):
-    """Render smooth live camera that sends frames at interval."""
-    html = LIVE_CLASSIFY_HTML % interval_ms
-    result = components.html(html, height=height, scrolling=False)
-    return result
-
-def decode_single_frame(raw_value):
-    """Decode single base64 data URL from live camera."""
-    if raw_value is None or not isinstance(raw_value, str) or not raw_value.startswith("data:"):
-        return None
-    try:
-        header, b64data = raw_value.split(",", 1)
-        img_bytes = base64.b64decode(b64data)
-        return Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    except Exception:
-        return None
-
-# ============================================================
 # SIDEBAR
 # ============================================================
 with st.sidebar:
@@ -561,7 +416,8 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # ===================== TAB 1: KLASIFIKASI =====================
 with tab1:
     st.markdown("## \U0001f50d Klasifikasi Gambar")
-    input_method = st.radio("Input:", ["Upload", "Kamera (Snapshot)", "\U0001f534 Real-Time (Live)", "URL"], horizontal=True, key="input_method")
+    input_method = st.radio("Input:", ["Upload", "Kamera (Snapshot)", "\U0001f534 Real-Time (Live)", "URL"],
+                            horizontal=True, key="input_method")
 
     img_input = None
 
@@ -577,37 +433,52 @@ with tab1:
 
     elif input_method == "\U0001f534 Real-Time (Live)":
         st.markdown("""<div class="info-box">
-        <b>\U0001f534 Real-Time:</b> Kamera berjalan smooth di browser. Frame dikirim ke AI setiap <b>N detik</b> untuk diklasifikasi.
-        Video tidak lag karena berjalan <b>native di browser</b> (bukan di-stream ke server).
+        <b>\U0001f534 Real-Time:</b> Kamera berjalan smooth di browser (native &lt;video&gt;).
+        Frame dikirim ke AI setiap <b>N detik</b> untuk klasifikasi otomatis.
         </div>""", unsafe_allow_html=True)
 
-        cls_interval = st.select_slider("Interval klasifikasi:", options=[500, 1000, 1500, 2000, 3000], value=1500,
+        cls_interval = st.select_slider("Interval klasifikasi:",
+            options=[500, 1000, 1500, 2000, 3000], value=1500,
             format_func=lambda x: f"{x/1000:.1f} detik", key="cls_interval")
 
         st.markdown("### \U0001f4f7 Live Camera")
-        raw = render_live_camera(interval_ms=cls_interval, height=400, key="live_cls")
-        live_img = decode_single_frame(raw)
+        frame_data = live_cam(
+            label="Live Klasifikasi",
+            interval_ms=cls_interval,
+            height=420,
+            key="live_cls_component"
+        )
 
-        result_area = st.container()
-        if live_img is not None:
-            with result_area:
-                with st.spinner("Klasifikasi..."):
+        if frame_data is not None:
+            try:
+                live_img = decode_data_url(frame_data)
+                col_live_img, col_live_res = st.columns([1, 1])
+                with col_live_img:
+                    st.image(live_img, caption="Frame terakhir", width="stretch")
+                with col_live_res:
                     t0 = time.time()
                     results = classify_single(live_img, class_mode, model_choice, custom_cats, top_k, confidence_threshold)
                     elapsed = time.time() - t0
-                if results:
-                    best = results[0]
-                    mode_label = "Custom" if class_mode == "Custom Model (.h5)" else model_choice.split("(")[0].strip()
-                    st.markdown(f'<div class="result-card"><h2>\U0001f3af {best["label"]}</h2><h3>{best["confidence"]*100:.1f}%</h3><p>{mode_label} \u2022 {elapsed:.2f}s</p></div>', unsafe_allow_html=True)
-                    for i, r in enumerate(results[:5]):
-                        emoji = ["\U0001f947", "\U0001f948", "\U0001f949"][i] if i < 3 else f"#{i+1}"
-                        st.progress(min(r["confidence"], 1.0), text=f"{emoji} {r['label']} \u2014 {r['confidence']*100:.1f}%")
-                    st.session_state.classification_history.append({
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "model": mode_label, "top_prediction": best["label"],
-                        "confidence": best["confidence"], "all_predictions": results,
-                        "elapsed": elapsed,
-                    })
+                    if results:
+                        best = results[0]
+                        mode_label = "Custom" if class_mode == "Custom Model (.h5)" else model_choice.split("(")[0].strip()
+                        st.markdown(f'<div class="result-card"><h2>\U0001f3af {best["label"]}</h2>'
+                                    f'<h3>{best["confidence"]*100:.1f}%</h3>'
+                                    f'<p>{mode_label} \u2022 {elapsed:.2f}s</p></div>',
+                                    unsafe_allow_html=True)
+                        for i, r in enumerate(results[:5]):
+                            emoji = ["\U0001f947", "\U0001f948", "\U0001f949"][i] if i < 3 else f"#{i+1}"
+                            st.progress(min(r["confidence"], 1.0),
+                                        text=f"{emoji} {r['label']} \u2014 {r['confidence']*100:.1f}%")
+                        st.session_state.classification_history.append({
+                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "model": mode_label, "top_prediction": best["label"],
+                            "confidence": best["confidence"], "all_predictions": results,
+                            "elapsed": elapsed,
+                        })
+            except Exception as e:
+                st.warning(f"Frame error: {e}")
+
         img_input = None
 
     else:
@@ -637,11 +508,15 @@ with tab1:
                 if results:
                     best = results[0]
                     mode_label = "Custom" if class_mode == "Custom Model (.h5)" else model_choice.split("(")[0].strip()
-                    st.markdown(f'<div class="result-card"><h2>\U0001f3af {best["label"]}</h2><h3>{best["confidence"]*100:.1f}% confidence</h3><p>{mode_label} \u2022 {elapsed:.2f}s</p></div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="result-card"><h2>\U0001f3af {best["label"]}</h2>'
+                                f'<h3>{best["confidence"]*100:.1f}% confidence</h3>'
+                                f'<p>{mode_label} \u2022 {elapsed:.2f}s</p></div>',
+                                unsafe_allow_html=True)
                     st.markdown("#### Top Prediksi:")
                     for i, r in enumerate(results):
                         emoji = ["\U0001f947", "\U0001f948", "\U0001f949"][i] if i < 3 else f"#{i+1}"
-                        st.progress(min(r["confidence"], 1.0), text=f"{emoji} {r['label']} \u2014 {r['confidence']*100:.1f}%")
+                        st.progress(min(r["confidence"], 1.0),
+                                    text=f"{emoji} {r['label']} \u2014 {r['confidence']*100:.1f}%")
                     if show_gradcam and class_mode != "Custom Model (.h5)":
                         st.markdown("#### \U0001f525 Grad-CAM")
                         try:
@@ -696,8 +571,7 @@ with tab2:
                         "confidence": f"{res[0]['confidence']*100:.1f}%",
                         "top_3": " | ".join([f"{r['label']} ({r['confidence']*100:.1f}%)" for r in res[:3]])})
                 prog.progress((idx + 1) / len(batch_files))
-            prog.empty()
-            status.empty()
+            prog.empty(); status.empty()
             if all_results and HAS_PD:
                 df = pd.DataFrame(all_results)
                 st.dataframe(df, use_container_width=True)
@@ -770,8 +644,7 @@ with tab3:
                 if st.button("\U0001f3cb\ufe0f Train!", type="primary", key="train_btn"):
                     info = PRETRAINED_MODELS[base_model]
                     target_size = info["size"]
-                    prog_bar = st.progress(0)
-                    status_text = st.empty()
+                    prog_bar = st.progress(0); status_text = st.empty()
                     status_text.text("Mempersiapkan data...")
                     if augment:
                         gen = keras.preprocessing.image.ImageDataGenerator(
@@ -810,15 +683,15 @@ with tab3:
                     st.session_state.trained_val_acc = history.history.get("val_accuracy", [0])[-1]
                     st.rerun()
 
-    # ---- SOURCE B: CAMERA CAPTURE ----
+    # ---- SOURCE B: CAMERA CAPTURE (HOLD-TO-CAPTURE) ----
     else:
         st.markdown("""<div class="info-box">
         <b>\U0001f4f7 Cara:</b><br>
         1. Tentukan nama-nama kategori<br>
         2. Pilih kategori aktif<br>
-        3. <b>Tahan tombol (atau tahan Spasi)</b> untuk otomatis capture terus-menerus<br>
-        4. Lepas tombol = berhenti capture<br>
-        5. Setelah cukup data \u2192 klik Train!
+        3. <b>Tahan tombol \U0001f4f7 (mouse/touch) atau tahan Spasi</b> \u2192 foto diambil otomatis terus-menerus<br>
+        4. <b>Lepas</b> \u2192 semua foto langsung tersimpan ke kategori<br>
+        5. Ulangi untuk kategori lain, lalu klik <b>Train!</b>
         </div>""", unsafe_allow_html=True)
 
         st.markdown("### \U0001f3f7\ufe0f Atur Kategori")
@@ -845,15 +718,26 @@ with tab3:
 
         cap_interval = st.select_slider("Interval capture (ms):",
             options=[100, 200, 300, 500, 750, 1000], value=300,
-            format_func=lambda x: f"{x}ms ({1000//x} fps)", key="cap_interval")
+            format_func=lambda x: f"{x}ms (~{1000//x} fps)", key="cap_interval")
 
-        st.markdown(f"**\U0001f3af Target: `{active_cat}`** \u2014 Tahan tombol di bawah atau tahan **Spasi** untuk capture otomatis")
+        st.markdown(f'**\U0001f3af Target: `{active_cat}`** \u2014 '
+                    f'Sudah: **{len(st.session_state.cam_training_data[active_cat])}** foto')
 
-        raw_result = render_auto_capture(capture_interval_ms=cap_interval, height=520, key="autocap_train")
-        new_images = decode_captured_frames(raw_result)
-        if new_images:
-            st.session_state.cam_training_data[active_cat].extend(new_images)
-            st.success(f"\u2705 +{len(new_images)} foto ditambahkan ke \"{active_cat}\" (total: {len(st.session_state.cam_training_data[active_cat])})")
+        # ===== BIDIRECTIONAL AUTO-CAPTURE COMPONENT =====
+        captured_frames = auto_cam(
+            label=f"\U0001f4f7 Tahan untuk capture ke \"{active_cat}\" (atau tahan Spasi)",
+            interval_ms=cap_interval,
+            height=520,
+            key="auto_cam_training"
+        )
+
+        if captured_frames is not None:
+            new_images = decode_data_url_list(captured_frames)
+            if new_images:
+                st.session_state.cam_training_data[active_cat].extend(new_images)
+                st.success(f"\u2705 +{len(new_images)} foto ditambahkan ke \"{active_cat}\" "
+                           f"(total: {len(st.session_state.cam_training_data[active_cat])})")
+                st.rerun()
 
         # Upload tambahan
         extra_files = st.file_uploader(f"Atau upload file ke \"{active_cat}\":",
@@ -939,7 +823,9 @@ with tab3:
         st.markdown("### \u2705 Training Results")
         t_acc = st.session_state.trained_acc
         t_val = st.session_state.trained_val_acc
-        st.markdown(f'<div class="result-card"><h2>\u2705 Selesai!</h2><h3>Acc: {t_acc*100:.1f}% | Val: {t_val*100:.1f}%</h3></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="result-card"><h2>\u2705 Selesai!</h2>'
+                    f'<h3>Acc: {t_acc*100:.1f}% | Val: {t_val*100:.1f}%</h3></div>',
+                    unsafe_allow_html=True)
         if HAS_PLOTLY and st.session_state.trained_history:
             th = st.session_state.trained_history
             c1, c2 = st.columns(2)
@@ -968,7 +854,8 @@ with tab3:
                 st.session_state.trained_labels_str = None
                 st.session_state.trained_history = None
                 st.rerun()
-        st.markdown('<div class="success-box">Model tersimpan! Pilih <b>Custom Model (.h5)</b> di sidebar untuk langsung pakai.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="success-box">Model tersimpan! Pilih <b>Custom Model (.h5)</b> di sidebar untuk langsung pakai.</div>',
+                    unsafe_allow_html=True)
 
 # ===================== TAB 4: HISTORY =====================
 with tab4:
@@ -995,9 +882,11 @@ with tab4:
                 cc[c] = cc.get(c, 0) + 1
             c1, c2 = st.columns(2)
             with c1:
-                st.plotly_chart(px.bar(x=list(cc.keys()), y=list(cc.values()), title="Distribusi", labels={"x":"Kategori","y":"Jumlah"}), use_container_width=True)
+                st.plotly_chart(px.bar(x=list(cc.keys()), y=list(cc.values()), title="Distribusi",
+                    labels={"x":"Kategori","y":"Jumlah"}), use_container_width=True)
             with c2:
-                st.plotly_chart(px.histogram(x=[h["confidence"]*100 for h in hd], nbins=20, title="Confidence", labels={"x":"Confidence (%)"}), use_container_width=True)
+                st.plotly_chart(px.histogram(x=[h["confidence"]*100 for h in hd], nbins=20, title="Confidence",
+                    labels={"x":"Confidence (%)"}), use_container_width=True)
         if HAS_PD:
             csv_buf = io.StringIO(); df_h.to_csv(csv_buf, index=False)
             st.download_button("\U0001f4be CSV", csv_buf.getvalue(), "history.csv", "text/csv", use_container_width=True)
@@ -1016,15 +905,15 @@ with tab5:
 ### \U0001f534 Real-Time Klasifikasi
 1. Pilih **\U0001f534 Real-Time (Live)** di tab Klasifikasi
 2. Kamera berjalan **smooth di browser** (native `<video>`)
-3. Frame dikirim ke AI setiap N detik (bisa diatur)
-4. Tidak lag karena video diproses di browser, bukan di-stream ke server
+3. Frame dikirim ke AI setiap N detik (bisa diatur) \u2192 hasil klasifikasi langsung muncul
+4. Tidak lag karena video di-render di browser, hanya 1 frame/interval dikirim ke server
 
-### \U0001f4f7 Training dari Kamera
+### \U0001f4f7 Training dari Kamera (Hold-to-Capture)
 1. Tab **Training** \u2192 **Ambil Foto dari Kamera**
 2. Tentukan nama-nama kategori
 3. Pilih kategori aktif
-4. **Tahan tombol capture (atau tahan Spasi)** = foto diambil terus-menerus otomatis!
-5. Lepas = berhenti capture
+4. **Tahan tombol \U0001f4f7 (mouse/touch) atau tahan Spasi** \u2192 foto diambil otomatis terus-menerus!
+5. **Lepas** \u2192 semua foto langsung tersimpan ke kategori aktif
 6. Ulangi untuk kategori lainnya
 7. Klik **Train!** setelah cukup data (\u2265 2 foto/kategori, \u2265 2 kategori)
 
@@ -1043,7 +932,12 @@ with tab5:
 - **ImageNet** \u2014 1000 kategori, langsung pakai
 - **Preset** \u2014 Bunga, tulang belakang, X-Ray, hewan, buah, kendaraan, digit
 - **Custom Model** \u2014 Upload `.h5` atau latih di tab Training
+
+### \U0001f525 Grad-CAM
+Area **merah/kuning** = bagian gambar yang paling mempengaruhi keputusan AI
     """)
 
 st.markdown("---")
-st.markdown('<div style="text-align:center;color:#888;font-size:0.85rem">\U0001f9e0 AI Image Classifier \u2022 TensorFlow \u2022 Real-Time \u2022 Grad-CAM</div>', unsafe_allow_html=True)
+st.markdown('<div style="text-align:center;color:#888;font-size:0.85rem">'
+            '\U0001f9e0 AI Image Classifier \u2022 TensorFlow \u2022 Real-Time \u2022 Grad-CAM</div>',
+            unsafe_allow_html=True)
