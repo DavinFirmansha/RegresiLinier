@@ -18,3 +18,4 @@ imbalanced-learn
 opencv-python-headless
 tensorflow
 Pillow
+streamlit-camera-input-live
