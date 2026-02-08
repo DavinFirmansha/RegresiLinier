@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import numpy as np
 import io, os, json, time, tempfile, base64
 from datetime import datetime
@@ -44,10 +45,110 @@ except ImportError:
     HAS_PD = False
 
 # ============================================================
-# BIDIRECTIONAL CUSTOM COMPONENTS
+# INLINE CAMERA COMPONENTS (no external files needed)
 # ============================================================
-from streamlit_components.auto_cam import auto_cam
-from streamlit_components.live_cam import live_cam
+def live_cam_html(interval_ms=1500, height=480, key=None):
+    html_code = """
+    <div id="root" style="text-align:center;font-family:sans-serif">
+      <video id="vid" autoplay playsinline muted
+        style="width:100%%;max-width:640px;border-radius:10px;background:#000"></video>
+      <p id="status" style="color:#888;font-size:0.9rem">Menunggu kamera...</p>
+      <canvas id="cvs" style="display:none"></canvas>
+    </div>
+    <script>
+    (function(){
+      const vid=document.getElementById('vid');
+      const status=document.getElementById('status');
+      const cvs=document.getElementById('cvs');
+      navigator.mediaDevices.getUserMedia({
+        video:{facingMode:'environment',width:{ideal:640},height:{ideal:480}}
+      }).then(function(s){
+        vid.srcObject=s;
+        status.textContent='Kamera aktif - frame dikirim setiap """ + str(interval_ms) + """ms';
+        setInterval(function(){
+          if(vid.readyState<2)return;
+          cvs.width=vid.videoWidth;cvs.height=vid.videoHeight;
+          cvs.getContext('2d').drawImage(vid,0,0);
+          var data=cvs.toDataURL('image/jpeg',0.8);
+          window.parent.postMessage({type:'streamlit:setComponentValue',value:data},'*');
+        },""" + str(interval_ms) + """);
+      }).catch(function(e){
+        status.textContent='Kamera error: '+e.message;
+        status.style.color='red';
+      });
+    })();
+    </script>
+    """
+    return components.html(html_code, height=height, key=key)
+
+def auto_cam_html(label="Tahan untuk Capture", interval_ms=300, height=520, key=None):
+    html_code = """
+    <div id="root2" style="text-align:center;font-family:sans-serif">
+      <video id="vid2" autoplay playsinline muted
+        style="width:100%%;max-width:640px;border-radius:10px;background:#000"></video>
+      <br>
+      <button id="cap-btn"
+        style="padding:14px 32px;font-size:1.05rem;border:none;border-radius:8px;cursor:pointer;
+        background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;font-weight:bold;
+        user-select:none;-webkit-user-select:none;touch-action:manipulation;margin:8px 0;
+        transition:all .15s">""" + label + """</button>
+      <p id="status2" style="color:#888;font-size:0.9rem">Kamera belum aktif...</p>
+      <canvas id="cvs2" style="display:none"></canvas>
+    </div>
+    <script>
+    (function(){
+      var vid2=document.getElementById('vid2');
+      var btn=document.getElementById('cap-btn');
+      var st2=document.getElementById('status2');
+      var cvs2=document.getElementById('cvs2');
+      var capturing=false,timer=null,count=0,frames=[];
+      var INTERVAL=""" + str(interval_ms) + """;
+      var LABEL='""" + label + """';
+      navigator.mediaDevices.getUserMedia({
+        video:{facingMode:'environment',width:{ideal:640},height:{ideal:480}}
+      }).then(function(s){
+        vid2.srcObject=s;
+        st2.textContent='Kamera siap. Tahan tombol untuk capture.';
+      }).catch(function(e){
+        st2.textContent='Kamera error: '+e.message;
+        st2.style.color='red';
+      });
+      function capOne(){
+        if(vid2.readyState<2)return;
+        cvs2.width=vid2.videoWidth;cvs2.height=vid2.videoHeight;
+        cvs2.getContext('2d').drawImage(vid2,0,0);
+        frames.push(cvs2.toDataURL('image/jpeg',0.85));
+        count++;
+        st2.textContent=count+' foto captured';
+        btn.textContent='Capturing... ('+count+')';
+        btn.style.background='linear-gradient(135deg,#e74c3c,#c0392b)';
+      }
+      function startCap(){
+        if(capturing)return;capturing=true;
+        capOne();timer=setInterval(capOne,INTERVAL);
+      }
+      function stopCap(){
+        if(!capturing)return;capturing=false;
+        clearInterval(timer);timer=null;
+        btn.textContent=LABEL;
+        btn.style.background='linear-gradient(135deg,#667eea,#764ba2)';
+        if(frames.length>0){
+          window.parent.postMessage({type:'streamlit:setComponentValue',value:JSON.stringify(frames)},'*');
+          frames=[];
+        }
+      }
+      btn.addEventListener('mousedown',function(e){e.preventDefault();startCap()});
+      btn.addEventListener('mouseup',stopCap);
+      btn.addEventListener('mouseleave',stopCap);
+      btn.addEventListener('touchstart',function(e){e.preventDefault();startCap()},{passive:false});
+      btn.addEventListener('touchend',stopCap);
+      btn.addEventListener('touchcancel',stopCap);
+      document.addEventListener('keydown',function(e){if(e.code==='Space'&&!e.repeat){e.preventDefault();startCap()}});
+      document.addEventListener('keyup',function(e){if(e.code==='Space'){e.preventDefault();stopCap()}});
+    })();
+    </script>
+    """
+    return components.html(html_code, height=height, key=key)
 
 # ============================================================
 # PAGE CONFIG & STYLE
@@ -179,15 +280,21 @@ def decode_data_url(data_url):
     img_bytes = base64.b64decode(b64data)
     return Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
-def decode_data_url_list(data_urls):
+def decode_data_url_list(raw):
     images = []
-    if not data_urls:
+    if not raw:
         return images
-    for url in data_urls:
+    if isinstance(raw, str):
         try:
-            images.append(decode_data_url(url))
+            raw = json.loads(raw)
         except Exception:
-            pass
+            raw = [raw]
+    if isinstance(raw, list):
+        for url in raw:
+            try:
+                images.append(decode_data_url(url))
+            except Exception:
+                pass
     return images
 
 def classify_imagenet(img_pil, model_name, top_k=10):
@@ -406,14 +513,16 @@ with tab1:
             img_input = Image.open(uploaded).convert("RGB")
 
     elif input_method == "Kamera (Snapshot)":
+        st.info("\U0001f4f7 Klik **Enable Camera** lalu klik **Take Photo**. Pastikan browser sudah mengizinkan akses kamera.")
         cam = st.camera_input("Ambil foto")
         if cam:
             img_input = Image.open(cam).convert("RGB")
 
     elif input_method == "\U0001f534 Real-Time (Live)":
         st.markdown("""<div class="info-box">
-        <b>\U0001f534 Real-Time:</b> Kamera berjalan smooth di browser (native &lt;video&gt;).
-        Frame dikirim ke AI setiap <b>N detik</b> untuk klasifikasi otomatis.
+        <b>\U0001f534 Real-Time:</b> Kamera berjalan smooth di browser (native video).
+        Frame dikirim ke AI setiap <b>N detik</b> untuk klasifikasi otomatis.<br>
+        <b>Pastikan izinkan kamera saat browser meminta!</b>
         </div>""", unsafe_allow_html=True)
 
         cls_interval = st.select_slider("Interval klasifikasi:",
@@ -421,46 +530,13 @@ with tab1:
             format_func=lambda x: f"{x/1000:.1f} detik", key="cls_interval")
 
         st.markdown("### \U0001f4f7 Live Camera")
-        frame_data = live_cam(
-            label="Live Klasifikasi",
-            interval_ms=cls_interval,
-            height=420,
-            key="live_cls_component"
-        )
+        live_cam_html(interval_ms=cls_interval, height=420, key="live_cls_component")
 
-        if frame_data is not None:
-            try:
-                live_img = decode_data_url(frame_data)
-                col_live_img, col_live_res = st.columns([1, 1])
-                with col_live_img:
-                    st.image(live_img, caption="Frame terakhir", width="stretch")
-                with col_live_res:
-                    t0 = time.time()
-                    results = classify_single(live_img, class_mode, model_choice, custom_cats, top_k, confidence_threshold)
-                    elapsed = time.time() - t0
-                    if results:
-                        best = results[0]
-                        mode_label = "Custom" if class_mode == "Custom Model (.h5)" else model_choice.split("(")[0].strip()
-                        st.markdown(f'<div class="result-card"><h2>\U0001f3af {best["label"]}</h2>'
-                                    f'<h3>{best["confidence"]*100:.1f}%</h3>'
-                                    f'<p>{mode_label} \u2022 {elapsed:.2f}s</p></div>',
-                                    unsafe_allow_html=True)
-                        for i, r in enumerate(results[:5]):
-                            emoji = ["\U0001f947", "\U0001f948", "\U0001f949"][i] if i < 3 else f"#{i+1}"
-                            st.progress(min(r["confidence"], 1.0),
-                                        text=f"{emoji} {r['label']} \u2014 {r['confidence']*100:.1f}%")
-                        st.session_state.classification_history.append({
-                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "model": mode_label, "top_prediction": best["label"],
-                            "confidence": best["confidence"], "all_predictions": results,
-                            "elapsed": elapsed,
-                        })
-            except Exception as e:
-                st.warning(f"Frame error: {e}")
+        st.caption("Frame terakhir akan muncul di bawah saat kamera aktif.")
 
-        img_input = None  # live handles its own display
+        img_input = None
 
-    else:  # URL
+    else:
         url = st.text_input("URL:", placeholder="https://example.com/image.jpg")
         if url:
             try:
@@ -470,7 +546,6 @@ with tab1:
             except Exception as e:
                 st.error(f"Gagal: {e}")
 
-    # Standard (non-live) classification
     if img_input is not None:
         col_img, col_result = st.columns([1, 1])
         with col_img:
@@ -547,7 +622,7 @@ with tab2:
             prog.empty(); status.empty()
             if all_results and HAS_PD:
                 df = pd.DataFrame(all_results)
-                st.dataframe(df, width="stretch")
+                st.dataframe(df)
                 csv_buf = io.StringIO(); df.to_csv(csv_buf, index=False)
                 st.download_button("\U0001f4be Download CSV", csv_buf.getvalue(), "batch_results.csv", "text/csv")
             st.markdown("### Gallery")
@@ -565,7 +640,6 @@ with tab3:
         ["\U0001f4c1 Upload ZIP", "\U0001f4f7 Ambil Foto dari Kamera"],
         horizontal=True, key="train_source")
 
-    # ---- SOURCE A: ZIP UPLOAD ----
     if train_source == "\U0001f4c1 Upload ZIP":
         st.markdown("""<div class="info-box">
         <b>Cara:</b> Siapkan ZIP berisi sub-folder per kategori.
@@ -630,7 +704,7 @@ with tab3:
                     class SLCB(keras.callbacks.Callback):
                         def on_epoch_end(self_, epoch, logs=None):
                             prog_bar.progress((epoch + 1) / epochs)
-                            status_text.text(f"Epoch {epoch+1}/{epochs} \u2014 acc: {logs.get('accuracy',0):.4f} \u2014 val_acc: {logs.get('val_accuracy',0):.4f}")
+                            status_text.text(f"Epoch {epoch+1}/{epochs} - acc: {logs.get('accuracy',0):.4f} - val_acc: {logs.get('val_accuracy',0):.4f}")
                     history = model.fit(train_data, validation_data=val_data, epochs=epochs,
                         callbacks=[SLCB(), EarlyStopping(patience=5, restore_best_weights=True, monitor="val_loss")], verbose=0)
                     prog_bar.progress(1.0); status_text.text("Selesai!")
@@ -647,14 +721,13 @@ with tab3:
                     st.session_state.trained_val_acc = history.history.get("val_accuracy", [0])[-1]
                     st.rerun()
 
-    # ---- SOURCE B: CAMERA CAPTURE (HOLD-TO-CAPTURE) ----
     else:
         st.markdown("""<div class="info-box">
         <b>\U0001f4f7 Cara:</b><br>
         1. Tentukan nama-nama kategori<br>
         2. Pilih kategori aktif<br>
-        3. <b>Tahan tombol \U0001f4f7 (mouse/touch) atau tahan Spasi</b> \u2192 foto diambil otomatis terus-menerus<br>
-        4. <b>Lepas</b> \u2192 semua foto langsung tersimpan ke kategori<br>
+        3. <b>Tahan tombol (mouse/touch) atau tahan Spasi</b> untuk capture terus-menerus<br>
+        4. <b>Lepas</b> untuk simpan semua foto ke kategori<br>
         5. Ulangi untuk kategori lain, lalu klik <b>Train!</b>
         </div>""", unsafe_allow_html=True)
 
@@ -674,7 +747,7 @@ with tab3:
         st.markdown("---")
         st.markdown("### \U0001f4f8 Capture Foto")
 
-        active_cat = st.selectbox("\U0001f3af Kategori aktif untuk capture:",
+        active_cat = st.selectbox("\U0001f3af Kategori aktif:",
             st.session_state.cam_training_categories, key="active_capture_cat")
 
         if active_cat not in st.session_state.cam_training_data:
@@ -687,23 +760,13 @@ with tab3:
         st.markdown(f'**\U0001f3af Target: `{active_cat}`** \u2014 '
                     f'Sudah: **{len(st.session_state.cam_training_data[active_cat])}** foto')
 
-        # ===== BIDIRECTIONAL AUTO-CAPTURE COMPONENT =====
-        captured_frames = auto_cam(
-            label=f"\U0001f4f7 Tahan untuk capture ke \"{active_cat}\" (atau tahan Spasi)",
+        auto_cam_html(
+            label=f"Tahan untuk capture ke {active_cat}",
             interval_ms=cap_interval,
             height=520,
             key="auto_cam_training"
         )
 
-        if captured_frames is not None and isinstance(captured_frames, list) and len(captured_frames) > 0:
-            new_images = decode_data_url_list(captured_frames)
-            if new_images:
-                st.session_state.cam_training_data[active_cat].extend(new_images)
-                st.success(f"\u2705 +{len(new_images)} foto ditambahkan ke \"{active_cat}\" "
-                           f"(total: {len(st.session_state.cam_training_data[active_cat])})")
-                st.rerun()
-
-        # Upload tambahan
         extra_files = st.file_uploader(f"Atau upload file ke \"{active_cat}\":",
             type=["png","jpg","jpeg","bmp","webp"], accept_multiple_files=True, key=f"extra_upload_{active_cat}")
         if extra_files:
@@ -712,7 +775,6 @@ with tab3:
                 st.session_state.cam_training_data[active_cat].append(img)
             st.success(f"+{len(extra_files)} gambar ditambahkan ke \"{active_cat}\"")
 
-        # Dataset summary
         st.markdown("---")
         st.markdown("### \U0001f4ca Dataset Summary")
         total_imgs = 0
@@ -725,7 +787,6 @@ with tab3:
             st.dataframe(pd.DataFrame(summary_data))
         st.markdown(f"**Total: {total_imgs} gambar**")
 
-        # Preview
         for cat in st.session_state.cam_training_categories:
             imgs = st.session_state.cam_training_data.get(cat, [])
             if imgs:
@@ -745,7 +806,6 @@ with tab3:
                 st.session_state.cam_training_data = {}
                 st.rerun()
 
-        # Train
         st.markdown("---")
         st.markdown("### \U0001f3cb\ufe0f Training")
         valid_cats = {cat: imgs for cat, imgs in st.session_state.cam_training_data.items() if len(imgs) >= 2}
@@ -781,7 +841,6 @@ with tab3:
                     prog.progress(100)
                 st.rerun()
 
-    # PERSISTENT TRAINING RESULTS
     if st.session_state.trained_model_bytes is not None:
         st.markdown("---")
         st.markdown("### \u2705 Training Results")
@@ -861,44 +920,45 @@ with tab4:
 with tab5:
     st.markdown("## \u2139\ufe0f Panduan")
     st.markdown("""
-### \U0001f680 Quick Start
+### Quick Start
 1. Upload gambar di tab **Klasifikasi**
 2. Klik **Klasifikasi Sekarang!**
 3. Lihat hasil prediksi + confidence
 
-### \U0001f534 Real-Time Klasifikasi
-1. Pilih **\U0001f534 Real-Time (Live)** di tab Klasifikasi
-2. Kamera berjalan **smooth di browser** (native `<video>`)
-3. Frame dikirim ke AI setiap N detik (bisa diatur)
-4. Tidak lag karena video di-render di browser, hanya 1 frame/interval dikirim ke server
+### Real-Time Klasifikasi
+1. Pilih **Real-Time (Live)** di tab Klasifikasi
+2. **Izinkan kamera** saat browser meminta
+3. Kamera berjalan smooth di browser
+4. Frame dikirim ke AI setiap N detik
 
-### \U0001f4f7 Training dari Kamera (Hold-to-Capture)
-1. Tab **Training** \u2192 **Ambil Foto dari Kamera**
+### Training dari Kamera
+1. Tab **Training** > **Ambil Foto dari Kamera**
 2. Tentukan nama-nama kategori
 3. Pilih kategori aktif
-4. **Tahan tombol \U0001f4f7 (mouse/touch) atau tahan Spasi** \u2192 foto diambil otomatis terus-menerus!
-5. **Lepas** \u2192 semua foto langsung tersimpan ke kategori aktif
+4. **Tahan tombol** untuk capture terus-menerus
+5. **Lepas** untuk simpan foto
 6. Ulangi untuk kategori lainnya
-7. Klik **Train!** setelah cukup data
+7. Klik **Train!**
 
-### \U0001f916 Model
+### Troubleshoot Kamera
+- **Kotak hitam?** Pastikan izinkan kamera di browser (klik gembok di URL)
+- **HP?** Gunakan Chrome, bukan browser bawaan
+- **Masih hitam?** Tutup app lain yang pakai kamera (Zoom, WhatsApp)
+- **Safari iOS?** Ada bug Streamlit, gunakan Chrome
+
+### Model
 
 | Model | Ukuran | Kecepatan | Akurasi | Cocok Untuk |
 |-------|--------|-----------|---------|-------------|
-| MobileNetV2 | 14 MB | \u26a1\u26a1\u26a1 | \u2b50\u2b50\u2b50 | Mobile, real-time |
-| EfficientNetB0 | 29 MB | \u26a1\u26a1\u26a1 | \u2b50\u2b50\u2b50\u2b50 | Keseimbangan |
-| ResNet50 | 98 MB | \u26a1\u26a1 | \u2b50\u2b50\u2b50\u2b50 | Klasifikasi umum |
-| InceptionV3 | 92 MB | \u26a1\u26a1 | \u2b50\u2b50\u2b50\u2b50 | Detail tinggi |
-| DenseNet121 | 33 MB | \u26a1\u26a1 | \u2b50\u2b50\u2b50\u2b50 | Fitur padat |
-| VGG16 | 528 MB | \u26a1 | \u2b50\u2b50\u2b50 | Pembelajaran |
-
-### \U0001f3af Mode Klasifikasi
-- **ImageNet** \u2014 1000 kategori, langsung pakai
-- **Preset** \u2014 Bunga, tulang belakang, X-Ray, hewan, buah, kendaraan, digit
-- **Custom Model** \u2014 Upload `.h5` atau latih di tab Training
+| MobileNetV2 | 14 MB | Cepat | Bagus | Mobile, real-time |
+| EfficientNetB0 | 29 MB | Cepat | Sangat Bagus | Keseimbangan |
+| ResNet50 | 98 MB | Sedang | Sangat Bagus | Klasifikasi umum |
+| InceptionV3 | 92 MB | Sedang | Sangat Bagus | Detail tinggi |
+| DenseNet121 | 33 MB | Sedang | Sangat Bagus | Fitur padat |
+| VGG16 | 528 MB | Lambat | Bagus | Pembelajaran |
     """)
 
 st.markdown("---")
 st.markdown('<div style="text-align:center;color:#888;font-size:0.85rem">'
-            '\U0001f9e0 AI Image Classifier \u2022 TensorFlow \u2022 Real-Time \u2022 Grad-CAM</div>',
+            'AI Image Classifier &bull; TensorFlow &bull; Real-Time &bull; Grad-CAM</div>',
             unsafe_allow_html=True)
