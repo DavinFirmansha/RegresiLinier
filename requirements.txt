@@ -13,4 +13,3 @@ libpysal
 esda
 mgwr
 streamlit-folium
-Poisson
