@@ -66,7 +66,7 @@ st.markdown('<div class="main-header">\U0001f9e0 AI Image Classifier</div>', uns
 st.markdown('<div class="sub-header">Upload gambar \u2192 AI mengenali kategorinya secara otomatis</div>', unsafe_allow_html=True)
 
 if not HAS_TF:
-    st.error("\u274c **TensorFlow belum terinstall!** Tambahkan `tensorflow` ke `requirements.txt`")
+    st.error("\u274c **TensorFlow belum terinstall!**")
     st.stop()
 
 # ============================================================
@@ -175,6 +175,46 @@ def classify_imagenet(img_pil, model_name, top_k=10):
     decoded = info["decode"](preds, top=top_k)
     return [{"class_id": cid, "label": lbl.replace("_"," ").title(), "confidence": float(sc)} for cid, lbl, sc in decoded[0]]
 
+def classify_custom(img_pil, custom_model, custom_labels, top_k=10):
+    inp_shape = custom_model.input_shape[1:3]
+    arr = preprocess_image(img_pil, inp_shape) / 255.0
+    preds = custom_model.predict(arr, verbose=0)[0]
+    labels = custom_labels or [f"Class {i}" for i in range(len(preds))]
+    results = []
+    for i, conf in enumerate(preds):
+        lbl = labels[i] if i < len(labels) else f"Class {i}"
+        results.append({"label": lbl, "confidence": float(conf), "class_id": str(i)})
+    results.sort(key=lambda x: x["confidence"], reverse=True)
+    return results[:top_k]
+
+def classify_preset(img_pil, model_name, preset_cats, top_k=10):
+    imagenet_res = classify_imagenet(img_pil, model_name, top_k=50)
+    results = []
+    for cat in preset_cats:
+        mx = 0
+        cat_lw = cat.lower().split("(")[0].strip()
+        for r in imagenet_res:
+            if cat_lw in r["label"].lower() or r["label"].lower() in cat_lw:
+                mx = max(mx, r["confidence"])
+            if set(r["label"].lower().split()) & set(cat_lw.split()):
+                mx = max(mx, r["confidence"])
+        results.append({"label": cat, "confidence": mx, "class_id": ""})
+    total = sum(r["confidence"] for r in results)
+    if total > 0:
+        for r in results:
+            r["confidence"] /= total
+    results.sort(key=lambda x: x["confidence"], reverse=True)
+    return results[:top_k]
+
+def classify_single(img_pil, class_mode, model_choice, custom_cats, top_k=10, conf_min=0):
+    if class_mode == "Custom Model (.h5)" and st.session_state.custom_model is not None:
+        return classify_custom(img_pil, st.session_state.custom_model, st.session_state.custom_categories, top_k)
+    elif class_mode == "Preset Kategori" and custom_cats:
+        return classify_preset(img_pil, model_choice, custom_cats, top_k)
+    else:
+        results = classify_imagenet(img_pil, model_choice, top_k=top_k)
+        return [r for r in results if r["confidence"] >= conf_min / 100]
+
 def build_transfer_model(base_model_name, num_classes, freeze_base=True):
     info = PRETRAINED_MODELS[base_model_name]
     base = info["class"](weights="imagenet", include_top=False, input_shape=(*info["size"], 3))
@@ -190,12 +230,30 @@ def build_transfer_model(base_model_name, num_classes, freeze_base=True):
     m.compile(optimizer=Adam(0.001), loss="categorical_crossentropy", metrics=["accuracy"])
     return m
 
-def generate_grad_cam(model, img_array, class_index):
-    last_conv = None
+def _find_last_conv_layer(model):
+    """Find last conv layer — compatible with Keras 2 AND Keras 3 (TF 2.20+)."""
     for layer in reversed(model.layers):
-        if len(layer.output_shape) == 4:
-            last_conv = layer.name
-            break
+        class_name = layer.__class__.__name__.lower()
+        if "conv" in class_name:
+            return layer.name
+        try:
+            shape = layer.output_shape
+            if isinstance(shape, list):
+                shape = shape[0]
+            if len(shape) == 4:
+                return layer.name
+        except (AttributeError, RuntimeError):
+            pass
+        try:
+            shape = layer.output.shape
+            if len(shape) == 4:
+                return layer.name
+        except (AttributeError, RuntimeError, ValueError):
+            pass
+    return None
+
+def generate_grad_cam(model, img_array, class_index):
+    last_conv = _find_last_conv_layer(model)
     if last_conv is None:
         return None
     grad_model = Model(inputs=model.input, outputs=[model.get_layer(last_conv).output, model.output])
@@ -205,7 +263,7 @@ def generate_grad_cam(model, img_array, class_index):
     grads = tape.gradient(loss, conv_out)
     if grads is None:
         return None
-    pooled = tf.reduce_mean(grads, axis=(0,1,2))
+    pooled = tf.reduce_mean(grads, axis=(0, 1, 2))
     heatmap = tf.squeeze(conv_out[0] @ pooled[..., tf.newaxis])
     heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-10)
     return heatmap.numpy()
@@ -266,6 +324,19 @@ with st.sidebar:
             st.success(f"{len(custom_cats)} labels")
 
     st.markdown("---")
+    if class_mode == "Custom Model (.h5)":
+        if st.session_state.custom_model is not None:
+            st.markdown('\U0001f7e2 **Custom model aktif**')
+            if st.session_state.custom_categories:
+                st.caption(f"Labels: {', '.join(st.session_state.custom_categories)}")
+        else:
+            st.markdown('\U0001f534 **Belum ada model**')
+    elif class_mode == "Preset Kategori":
+        st.markdown(f'\U0001f7e1 **Preset: {len(custom_cats)} kategori**')
+    else:
+        st.markdown('\U0001f535 **ImageNet: 1000 kategori**')
+
+    st.markdown("---")
     top_k = st.slider("Top-K Prediksi:", 1, 20, 5)
     show_gradcam = st.checkbox("Tampilkan Grad-CAM", value=True)
     confidence_threshold = st.slider("Confidence Min (%):", 0, 100, 5)
@@ -321,49 +392,20 @@ with tab1:
             if st.button("\U0001f680 Klasifikasi Sekarang!", type="primary", use_container_width=True, key="cls_btn"):
                 with st.spinner("Menganalisis..."):
                     t0 = time.time()
-                    if class_mode == "ImageNet (1000 Kategori)":
-                        results = classify_imagenet(img_input, model_choice, top_k=top_k)
-                        results = [r for r in results if r["confidence"] >= confidence_threshold / 100]
-                    elif class_mode == "Preset Kategori":
-                        imagenet_res = classify_imagenet(img_input, model_choice, top_k=50)
-                        results = []
-                        for cat in custom_cats:
-                            mx = 0
-                            cat_lw = cat.lower().split("(")[0].strip()
-                            for r in imagenet_res:
-                                if cat_lw in r["label"].lower() or r["label"].lower() in cat_lw:
-                                    mx = max(mx, r["confidence"])
-                                if set(r["label"].lower().split()) & set(cat_lw.split()):
-                                    mx = max(mx, r["confidence"])
-                            results.append({"label": cat, "confidence": mx, "class_id": ""})
-                        total = sum(r["confidence"] for r in results)
-                        if total > 0:
-                            for r in results:
-                                r["confidence"] /= total
-                        results.sort(key=lambda x: x["confidence"], reverse=True)
-                        results = results[:top_k]
-                    elif class_mode == "Custom Model (.h5)" and st.session_state.custom_model is not None:
-                        cm = st.session_state.custom_model
-                        arr = preprocess_image(img_input, cm.input_shape[1:3]) / 255.0
-                        preds = cm.predict(arr, verbose=0)[0]
-                        labels = st.session_state.custom_categories or [f"Class {i}" for i in range(len(preds))]
-                        results = [{"label": labels[i] if i < len(labels) else f"Class {i}", "confidence": float(c), "class_id": str(i)} for i, c in enumerate(preds)]
-                        results.sort(key=lambda x: x["confidence"], reverse=True)
-                        results = results[:top_k]
-                    else:
-                        results = []
+                    results = classify_single(img_input, class_mode, model_choice, custom_cats, top_k, confidence_threshold)
                     elapsed = time.time() - t0
 
                 if results:
                     best = results[0]
-                    st.markdown(f'<div class="result-card"><h2>\U0001f3af {best["label"]}</h2><h3>{best["confidence"]*100:.1f}% confidence</h3><p>{model_choice.split("(")[0].strip()} \u2022 {elapsed:.2f}s</p></div>', unsafe_allow_html=True)
+                    mode_label = "Custom" if class_mode == "Custom Model (.h5)" else model_choice.split("(")[0].strip()
+                    st.markdown(f'<div class="result-card"><h2>\U0001f3af {best["label"]}</h2><h3>{best["confidence"]*100:.1f}% confidence</h3><p>{mode_label} \u2022 {elapsed:.2f}s</p></div>', unsafe_allow_html=True)
 
                     st.markdown("#### Top Prediksi:")
                     for i, r in enumerate(results):
                         emoji = ["\U0001f947", "\U0001f948", "\U0001f949"][i] if i < 3 else f"#{i+1}"
                         st.progress(min(r["confidence"], 1.0), text=f"{emoji} {r['label']} \u2014 {r['confidence']*100:.1f}%")
 
-                    if show_gradcam:
+                    if show_gradcam and class_mode != "Custom Model (.h5)":
                         st.markdown("#### \U0001f525 Grad-CAM")
                         try:
                             mdl = load_pretrained_model(model_choice)
@@ -385,7 +427,7 @@ with tab1:
 
                     st.session_state.classification_history.append({
                         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "model": model_choice.split("(")[0].strip(),
+                        "model": mode_label,
                         "top_prediction": best["label"], "confidence": best["confidence"],
                         "all_predictions": results, "elapsed": elapsed,
                     })
@@ -395,22 +437,33 @@ with tab1:
 # ===================== TAB 2: BATCH =====================
 with tab2:
     st.markdown("## \U0001f4da Batch Klasifikasi")
+
+    if class_mode == "Custom Model (.h5)" and st.session_state.custom_model is not None:
+        st.markdown(f'\U0001f7e2 **Mode: Custom Model** \u2014 Labels: {", ".join(st.session_state.custom_categories or ["(no labels)"])}')
+    elif class_mode == "Preset Kategori":
+        st.markdown(f'\U0001f7e1 **Mode: Preset** \u2014 {", ".join(custom_cats)}')
+    else:
+        st.markdown('\U0001f535 **Mode: ImageNet (1000 Kategori)**')
+
     batch_files = st.file_uploader("Upload gambar:", type=["png","jpg","jpeg","bmp","webp"],
                                     accept_multiple_files=True, key="batch_upload")
     if batch_files:
-        st.markdown(f"**{len(batch_files)} gambar**")
+        st.markdown(f"**{len(batch_files)} gambar siap**")
         if st.button("\U0001f680 Klasifikasi Semua", type="primary", key="batch_btn"):
             all_results = []
             prog = st.progress(0)
+            status = st.empty()
             for idx, f in enumerate(batch_files):
+                status.text(f"Mengklasifikasi {f.name}... ({idx+1}/{len(batch_files)})")
                 img = Image.open(f).convert("RGB")
-                res = classify_imagenet(img, model_choice, top_k=top_k)
+                res = classify_single(img, class_mode, model_choice, custom_cats, top_k, confidence_threshold)
                 if res:
                     all_results.append({"filename": f.name, "prediction": res[0]["label"],
                         "confidence": f"{res[0]['confidence']*100:.1f}%",
                         "top_3": " | ".join([f"{r['label']} ({r['confidence']*100:.1f}%)" for r in res[:3]])})
                 prog.progress((idx + 1) / len(batch_files))
             prog.empty()
+            status.empty()
 
             if all_results and HAS_PD:
                 df = pd.DataFrame(all_results)
@@ -542,7 +595,6 @@ with tab3:
                 st.session_state.trained_val_acc = final_val
                 st.rerun()
 
-    # PERSISTENT TRAINING RESULTS (survives download-button rerun)
     if st.session_state.trained_model_bytes is not None:
         st.markdown("---")
         st.markdown("### \u2705 Training Results")
@@ -640,12 +692,9 @@ with tab5:
 | VGG16 | 528 MB | \u26a1 | \u2b50\u2b50\u2b50 | Pembelajaran |
 
 ### \U0001f3af Mode Klasifikasi
-
-**ImageNet** \u2014 1000 kategori, langsung pakai
-
-**Preset** \u2014 Bunga, tulang belakang, X-Ray paru, hewan, buah, kendaraan, digit
-
-**Custom Model** \u2014 Upload `.h5` atau latih di tab Training
+- **ImageNet** \u2014 1000 kategori, langsung pakai
+- **Preset** \u2014 Bunga, tulang belakang, X-Ray paru, hewan, buah, kendaraan, digit
+- **Custom Model** \u2014 Upload `.h5` atau latih di tab Training
 
 ### \U0001f3eb Training
 1. ZIP folder dengan sub-folder per kategori
