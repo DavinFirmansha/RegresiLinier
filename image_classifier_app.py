@@ -47,7 +47,7 @@ except ImportError:
 # ============================================================
 # INLINE CAMERA COMPONENTS (no external files needed)
 # ============================================================
-def live_cam_html(interval_ms=1500, height=480, key=None):
+def live_cam_html(interval_ms=1500, height=480):
     html_code = """
     <div id="root" style="text-align:center;font-family:sans-serif">
       <video id="vid" autoplay playsinline muted
@@ -57,9 +57,9 @@ def live_cam_html(interval_ms=1500, height=480, key=None):
     </div>
     <script>
     (function(){
-      const vid=document.getElementById('vid');
-      const status=document.getElementById('status');
-      const cvs=document.getElementById('cvs');
+      var vid=document.getElementById('vid');
+      var status=document.getElementById('status');
+      var cvs=document.getElementById('cvs');
       navigator.mediaDevices.getUserMedia({
         video:{facingMode:'environment',width:{ideal:640},height:{ideal:480}}
       }).then(function(s){
@@ -79,9 +79,9 @@ def live_cam_html(interval_ms=1500, height=480, key=None):
     })();
     </script>
     """
-    return components.html(html_code, height=height, key=key)
+    return components.html(html_code, height=height, scrolling=False)
 
-def auto_cam_html(label="Tahan untuk Capture", interval_ms=300, height=520, key=None):
+def auto_cam_html(label="Tahan untuk Capture", interval_ms=300, height=520):
     html_code = """
     <div id="root2" style="text-align:center;font-family:sans-serif">
       <video id="vid2" autoplay playsinline muted
@@ -148,7 +148,7 @@ def auto_cam_html(label="Tahan untuk Capture", interval_ms=300, height=520, key=
     })();
     </script>
     """
-    return components.html(html_code, height=height, key=key)
+    return components.html(html_code, height=height, scrolling=False)
 
 # ============================================================
 # PAGE CONFIG & STYLE
@@ -530,10 +530,9 @@ with tab1:
             format_func=lambda x: f"{x/1000:.1f} detik", key="cls_interval")
 
         st.markdown("### \U0001f4f7 Live Camera")
-        live_cam_html(interval_ms=cls_interval, height=420, key="live_cls_component")
+        live_cam_html(interval_ms=cls_interval, height=420)
 
         st.caption("Frame terakhir akan muncul di bawah saat kamera aktif.")
-
         img_input = None
 
     else:
@@ -763,8 +762,7 @@ with tab3:
         auto_cam_html(
             label=f"Tahan untuk capture ke {active_cat}",
             interval_ms=cap_interval,
-            height=520,
-            key="auto_cam_training"
+            height=520
         )
 
         extra_files = st.file_uploader(f"Atau upload file ke \"{active_cat}\":",
