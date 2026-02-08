@@ -2,7 +2,7 @@ import streamlit as st
 import numpy as np
 import io, os, json, time, tempfile, zipfile, base64
 from datetime import datetime
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 # ============================================================
 # SAFE IMPORTS
@@ -11,12 +11,11 @@ try:
     import tensorflow as tf
     from tensorflow import keras
     from tensorflow.keras.applications import (
-        MobileNetV2, ResNet50, EfficientNetB0, InceptionV3, VGG16, DenseNet121, NASNetMobile, Xception
+        MobileNetV2, ResNet50, EfficientNetB0, InceptionV3, VGG16, DenseNet121
     )
     from tensorflow.keras.applications import (
-        mobilenet_v2, resnet50, efficientnet, inception_v3, vgg16, densenet, nasnet, xception
+        mobilenet_v2, resnet50, efficientnet, inception_v3, vgg16, densenet
     )
-    from tensorflow.keras.preprocessing import image as keras_image
     from tensorflow.keras.models import load_model, Model
     from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
     from tensorflow.keras.optimizers import Adam
@@ -63,8 +62,6 @@ text-align:center;color:white!important;margin:.3rem 0}.metric-card *{color:whit
 .warn-box,.warn-box *{color:#7d6608!important}
 .success-box{background:#D5F5E3;border-left:5px solid #27AE60;padding:1rem;border-radius:5px;margin:.5rem 0}
 .success-box,.success-box *{color:#145a32!important}
-.category-badge{display:inline-block;padding:0.4rem 1rem;border-radius:20px;font-weight:bold;
-font-size:1.2rem;margin:0.3rem}
 </style>""", unsafe_allow_html=True)
 
 # ============================================================
@@ -73,7 +70,6 @@ font-size:1.2rem;margin:0.3rem}
 st.markdown('<div class="main-header">\U0001f9e0 AI Image Classifier</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">Upload gambar \u2192 AI mengenali kategorinya secara otomatis</div>', unsafe_allow_html=True)
 
-# Check dependencies
 if not HAS_TF:
     st.error("\u274c **TensorFlow belum terinstall!** Tambahkan `tensorflow` ke `requirements.txt`")
     st.code("# requirements.txt\nstreamlit\ntensorflow\nPillow\nplotly\npandas\nopencv-python-headless", language="text")
@@ -116,49 +112,40 @@ PRETRAINED_MODELS = {
 }
 
 # ============================================================
-# CUSTOM CLASSIFICATION PRESETS
+# CLASSIFICATION PRESETS
 # ============================================================
 CLASSIFICATION_PRESETS = {
     "\U0001f338 Jenis Bunga": {
         "categories": ["Daisy", "Dandelion", "Rose", "Sunflower", "Tulip"],
         "description": "Klasifikasi 5 jenis bunga populer",
-        "dataset_url": "https://storage.googleapis.com/download.tensorflow.org/example_images/flower_photos.tgz",
-        "examples": ["daisy.jpg", "rose.jpg", "tulip.jpg"]
     },
     "\U0001f9b4 Postur Tulang Belakang": {
         "categories": ["Normal", "Kyphosis (Kifosis/Bungkuk)", "Lordosis (Lordosis)", "Scoliosis (Skoliosis)"],
         "description": "Deteksi kelainan tulang belakang: kifosis, lordosis, skoliosis",
-        "examples": []
     },
     "\U0001f3e5 Penyakit Paru (X-Ray)": {
         "categories": ["Normal", "Pneumonia", "COVID-19", "Tuberculosis"],
         "description": "Klasifikasi X-Ray paru-paru",
-        "examples": []
     },
     "\U0001f431 Hewan Peliharaan": {
         "categories": ["Dog", "Cat", "Bird", "Fish", "Hamster", "Rabbit"],
         "description": "Mengenali jenis hewan peliharaan",
-        "examples": []
     },
     "\U0001f34e Buah-buahan": {
         "categories": ["Apple", "Banana", "Orange", "Grape", "Mango", "Strawberry", "Watermelon"],
         "description": "Klasifikasi jenis buah",
-        "examples": []
     },
     "\U0001f697 Kendaraan": {
         "categories": ["Car", "Motorcycle", "Bus", "Truck", "Bicycle"],
         "description": "Mengenali jenis kendaraan",
-        "examples": []
     },
     "\u270d\ufe0f Tulisan Tangan (Digit)": {
-        "categories": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+        "categories": ["0","1","2","3","4","5","6","7","8","9"],
         "description": "Mengenali angka tulisan tangan (MNIST)",
-        "examples": []
     },
     "\U0001f3d7\ufe0f Custom (Buat Sendiri)": {
         "categories": [],
         "description": "Buat kategori klasifikasi sendiri",
-        "examples": []
     },
 }
 
@@ -179,20 +166,17 @@ for k, v in defaults.items():
 # ============================================================
 @st.cache_resource
 def load_pretrained_model(model_name):
-    """Load pretrained ImageNet model."""
     info = PRETRAINED_MODELS[model_name]
     model = info["class"](weights="imagenet")
     return model
 
 def preprocess_image(img_pil, target_size):
-    """Preprocess PIL image for model input."""
     img = img_pil.convert("RGB").resize(target_size)
     arr = np.array(img).astype(np.float32)
     arr = np.expand_dims(arr, axis=0)
     return arr
 
 def classify_imagenet(img_pil, model_name, top_k=10):
-    """Classify using ImageNet pretrained model."""
     info = PRETRAINED_MODELS[model_name]
     model = load_pretrained_model(model_name)
     arr = preprocess_image(img_pil, info["size"])
@@ -205,7 +189,6 @@ def classify_imagenet(img_pil, model_name, top_k=10):
     return results
 
 def build_transfer_model(base_model_name, num_classes, freeze_base=True):
-    """Build transfer learning model for custom categories."""
     info = PRETRAINED_MODELS[base_model_name]
     base = info["class"](weights="imagenet", include_top=False, input_shape=(*info["size"], 3))
     if freeze_base:
@@ -222,7 +205,6 @@ def build_transfer_model(base_model_name, num_classes, freeze_base=True):
     return model
 
 def generate_grad_cam(model, img_array, class_index, last_conv_layer_name=None):
-    """Generate Grad-CAM heatmap."""
     if last_conv_layer_name is None:
         for layer in reversed(model.layers):
             if len(layer.output_shape) == 4:
@@ -245,7 +227,6 @@ def generate_grad_cam(model, img_array, class_index, last_conv_layer_name=None):
     return heatmap.numpy()
 
 def overlay_heatmap(img_pil, heatmap, alpha=0.4):
-    """Overlay Grad-CAM heatmap on image."""
     if heatmap is None:
         return img_pil
     img = np.array(img_pil.convert("RGB").resize((224, 224)))
@@ -257,6 +238,15 @@ def overlay_heatmap(img_pil, heatmap, alpha=0.4):
         heatmap_colored = np.stack([heatmap_resized, np.zeros_like(heatmap_resized), 255 - heatmap_resized], axis=2)
     blended = np.clip(img.astype(float) * (1 - alpha) + heatmap_colored.astype(float) * alpha, 0, 255).astype(np.uint8)
     return Image.fromarray(blended)
+
+def get_download_buffer(img, fmt="PNG", quality=95):
+    buf = io.BytesIO()
+    if fmt.upper() == "JPEG":
+        img.convert("RGB").save(buf, format="JPEG", quality=quality)
+    else:
+        img.save(buf, format=fmt.upper())
+    buf.seek(0)
+    return buf
 
 # ============================================================
 # SIDEBAR
@@ -326,14 +316,13 @@ with st.sidebar:
 # MAIN TABS
 # ============================================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "\U0001f50d Klasifikasi", "\U0001f4da Batch Klasifikasi", "\U0001f3eb Training",
-    "\U0001f4c8 History & Analisis", "\u2139\ufe0f Panduan"
+    "\U0001f50d Klasifikasi", "\U0001f4da Batch", "\U0001f3eb Training",
+    "\U0001f4c8 History", "\u2139\ufe0f Panduan"
 ])
 
 # ===================== TAB 1: KLASIFIKASI =====================
 with tab1:
     st.markdown("## \U0001f50d Klasifikasi Gambar")
-
     input_method = st.radio("Input:", ["Upload Gambar", "Kamera", "URL Gambar"], horizontal=True)
 
     img_input = None
@@ -360,7 +349,7 @@ with tab1:
 
         with col_img:
             st.markdown("### \U0001f5bc\ufe0f Gambar Input")
-            st.image(img_input, use_container_width=True)
+            st.image(img_input, width=None)
             st.caption(f"Ukuran: {img_input.width} x {img_input.height} px")
 
         with col_result:
@@ -375,7 +364,6 @@ with tab1:
                         results = [r for r in results if r["confidence"] >= confidence_threshold / 100]
 
                     elif class_mode == "Preset Kategori":
-                        # Use ImageNet and map to preset categories
                         imagenet_results = classify_imagenet(img_input, model_choice, top_k=50)
                         results = []
                         for cat in custom_cats:
@@ -384,14 +372,12 @@ with tab1:
                             for r in imagenet_results:
                                 if cat_lower in r["label"].lower() or r["label"].lower() in cat_lower:
                                     max_conf = max(max_conf, r["confidence"])
-                            # Also do a semantic similarity based on keyword
                             for r in imagenet_results:
                                 words_r = set(r["label"].lower().split())
                                 words_c = set(cat_lower.split())
                                 if words_r & words_c:
                                     max_conf = max(max_conf, r["confidence"])
                             results.append({"label": cat, "confidence": max_conf, "class_id": ""})
-                        # Normalize
                         total = sum(r["confidence"] for r in results)
                         if total > 0:
                             for r in results:
@@ -401,11 +387,11 @@ with tab1:
 
                     elif class_mode == "Custom Model (.h5)":
                         if st.session_state.custom_model is not None:
-                            model = st.session_state.custom_model
-                            inp_shape = model.input_shape[1:3]
+                            cmodel = st.session_state.custom_model
+                            inp_shape = cmodel.input_shape[1:3]
                             arr = preprocess_image(img_input, inp_shape)
                             arr = arr / 255.0
-                            preds = model.predict(arr, verbose=0)[0]
+                            preds = cmodel.predict(arr, verbose=0)[0]
                             labels = st.session_state.custom_categories or [f"Class {i}" for i in range(len(preds))]
                             results = []
                             for i, conf in enumerate(preds):
@@ -414,7 +400,8 @@ with tab1:
                             results.sort(key=lambda x: x["confidence"], reverse=True)
                             results = results[:top_k]
                         else:
-                            st.warning("Upload model terlebih dahulu!"); results = []
+                            st.warning("Upload model terlebih dahulu!")
+                            results = []
                     else:
                         results = []
 
@@ -426,7 +413,7 @@ with tab1:
                     <div class="result-card">
                         <h2>\U0001f3af {best['label']}</h2>
                         <h3>{best['confidence']*100:.1f}% confidence</h3>
-                        <p>Model: {model_choice} \u2022 Waktu: {elapsed:.2f}s</p>
+                        <p>Model: {model_choice.split('(')[0].strip()} \u2022 {elapsed:.2f}s</p>
                     </div>
                     """, unsafe_allow_html=True)
 
@@ -434,13 +421,8 @@ with tab1:
                     for i, r in enumerate(results):
                         pct = r["confidence"] * 100
                         emoji = ["\U0001f947", "\U0001f948", "\U0001f949"][i] if i < 3 else f"#{i+1}"
-                        col_a, col_b = st.columns([3, 1])
-                        with col_a:
-                            st.progress(min(r["confidence"], 1.0), text=f"{emoji} {r['label']}")
-                        with col_b:
-                            st.markdown(f"**{pct:.1f}%**")
+                        st.progress(min(r["confidence"], 1.0), text=f"{emoji} {r['label']} — {pct:.1f}%")
 
-                    # Grad-CAM
                     if show_gradcam:
                         st.markdown("#### \U0001f525 Grad-CAM (Area Fokus AI)")
                         try:
@@ -454,51 +436,45 @@ with tab1:
                             if heatmap is not None:
                                 cam_img = overlay_heatmap(img_input, heatmap)
                                 gc1, gc2 = st.columns(2)
-                                with gc1: st.image(img_input, caption="Original", use_container_width=True)
-                                with gc2: st.image(cam_img, caption="Grad-CAM", use_container_width=True)
-                                st.caption("Area merah/kuning = area yang paling diperhatikan AI untuk membuat keputusan")
+                                with gc1:
+                                    st.image(img_input, caption="Original", width=None)
+                                with gc2:
+                                    st.image(cam_img, caption="Grad-CAM", width=None)
+                                st.caption("Merah/kuning = area paling diperhatikan AI")
                             else:
-                                st.info("Grad-CAM tidak tersedia untuk konfigurasi ini.")
+                                st.info("Grad-CAM tidak tersedia.")
                         except Exception as e:
                             st.warning(f"Grad-CAM error: {e}")
 
-                    # Save to history
                     st.session_state.classification_history.append({
                         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "model": model_choice,
+                        "model": model_choice.split("(")[0].strip(),
                         "top_prediction": best["label"],
                         "confidence": best["confidence"],
                         "all_predictions": results,
                         "elapsed": elapsed,
                     })
                 else:
-                    st.warning("Tidak ada hasil klasifikasi.")
+                    st.warning("Tidak ada hasil.")
 
 # ===================== TAB 2: BATCH =====================
 with tab2:
     st.markdown("## \U0001f4da Batch Klasifikasi")
-    st.markdown("Upload banyak gambar sekaligus untuk diklasifikasi.")
+    st.markdown("Upload banyak gambar sekaligus.")
 
     batch_files = st.file_uploader("Upload gambar:", type=["png","jpg","jpeg","bmp","webp"],
                                     accept_multiple_files=True, key="batch_upload")
-
     if batch_files:
-        st.markdown(f"**{len(batch_files)} gambar siap diklasifikasi**")
+        st.markdown(f"**{len(batch_files)} gambar**")
 
         if st.button("\U0001f680 Klasifikasi Semua", type="primary", key="batch_btn"):
             all_results = []
             prog = st.progress(0)
             status = st.empty()
-
             for idx, f in enumerate(batch_files):
                 status.text(f"Mengklasifikasi {f.name}... ({idx+1}/{len(batch_files)})")
                 img = Image.open(f).convert("RGB")
-
-                if class_mode == "ImageNet (1000 Kategori)":
-                    res = classify_imagenet(img, model_choice, top_k=top_k)
-                else:
-                    res = classify_imagenet(img, model_choice, top_k=top_k)
-
+                res = classify_imagenet(img, model_choice, top_k=top_k)
                 if res:
                     all_results.append({
                         "filename": f.name,
@@ -507,14 +483,13 @@ with tab2:
                         "top_3": " | ".join([f"{r['label']} ({r['confidence']*100:.1f}%)" for r in res[:3]]),
                     })
                 prog.progress((idx + 1) / len(batch_files))
-
-            prog.empty(); status.empty()
+            prog.empty()
+            status.empty()
 
             if all_results and HAS_PD:
                 df = pd.DataFrame(all_results)
                 st.dataframe(df, use_container_width=True)
 
-                # Summary stats
                 st.markdown("### \U0001f4ca Ringkasan")
                 pred_counts = df["prediction"].value_counts()
                 c1, c2 = st.columns(2)
@@ -524,37 +499,34 @@ with tab2:
                         st.markdown(f"- **{cat}**: {cnt} gambar ({cnt/len(df)*100:.0f}%)")
                 with c2:
                     if HAS_PLOTLY:
-                        fig = px.pie(values=pred_counts.values, names=pred_counts.index, title="Distribusi Kategori")
+                        fig = px.pie(values=pred_counts.values, names=pred_counts.index, title="Distribusi")
                         st.plotly_chart(fig, use_container_width=True)
 
-                # Download CSV
-                csv_buf = io.StringIO(); df.to_csv(csv_buf, index=False)
+                csv_buf = io.StringIO()
+                df.to_csv(csv_buf, index=False)
                 st.download_button("\U0001f4be Download CSV", csv_buf.getvalue(), "batch_results.csv", "text/csv", use_container_width=True)
 
-            # Gallery view
             st.markdown("### \U0001f5bc\ufe0f Gallery")
             cols = st.columns(4)
             for idx, f in enumerate(batch_files):
                 with cols[idx % 4]:
                     img = Image.open(f).convert("RGB")
-                    if idx < len(all_results):
-                        st.image(img, caption=f"{all_results[idx]['prediction']} ({all_results[idx]['confidence']})", use_container_width=True)
-                    else:
-                        st.image(img, caption=f.name, use_container_width=True)
+                    cap = f"{all_results[idx]['prediction']} ({all_results[idx]['confidence']})" if idx < len(all_results) else f.name
+                    st.image(img, caption=cap, width=None)
 
 # ===================== TAB 3: TRAINING =====================
 with tab3:
     st.markdown("## \U0001f3eb Training Custom Model")
-    st.markdown("Latih model klasifikasi Anda sendiri dengan transfer learning.")
+    st.markdown("Latih model sendiri dengan **transfer learning**.")
 
     st.markdown("""
     <div class="info-box">
     <b>Cara Pakai:</b><br>
-    1. Siapkan folder ZIP berisi sub-folder per kategori (misal: <code>bunga/daisy/*.jpg</code>, <code>bunga/rose/*.jpg</code>)<br>
+    1. Siapkan folder ZIP berisi sub-folder per kategori (misal: <code>daisy/*.jpg</code>, <code>rose/*.jpg</code>)<br>
     2. Upload ZIP tersebut<br>
-    3. Pilih model base & parameter training<br>
+    3. Pilih parameter training<br>
     4. Klik Train!<br>
-    5. Download model yang sudah dilatih
+    5. Download model hasil training (.h5 + labels.txt)
     </div>
     """, unsafe_allow_html=True)
 
@@ -563,20 +535,18 @@ with tab3:
     if train_zip:
         with tempfile.TemporaryDirectory() as tmpdir:
             zip_path = os.path.join(tmpdir, "dataset.zip")
-            with open(zip_path, "wb") as f:
-                f.write(train_zip.read())
+            with open(zip_path, "wb") as fw:
+                fw.write(train_zip.read())
 
-            import zipfile as zf
-            with zf.ZipFile(zip_path, "r") as z:
+            import zipfile as zf_mod
+            with zf_mod.ZipFile(zip_path, "r") as z:
                 z.extractall(tmpdir)
 
-            # Find the root with subdirectories
             data_root = tmpdir
-            subdirs = [d for d in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, d)) and not d.startswith("__")]
-            # Check if there's a single wrapper folder
+            subdirs = [d for d in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, d)) and not d.startswith("__") and not d.startswith(".")]
             if len(subdirs) == 1:
                 inner = os.path.join(data_root, subdirs[0])
-                inner_subs = [d for d in os.listdir(inner) if os.path.isdir(os.path.join(inner, d)) and not d.startswith("__")]
+                inner_subs = [d for d in os.listdir(inner) if os.path.isdir(os.path.join(inner, d)) and not d.startswith("__") and not d.startswith(".")]
                 if len(inner_subs) > 1:
                     data_root = inner
                     subdirs = inner_subs
@@ -588,18 +558,22 @@ with tab3:
                 imgs = [f for f in os.listdir(cat_path) if f.lower().endswith((".jpg",".jpeg",".png",".bmp",".webp"))]
                 img_counts[cat] = len(imgs)
 
-            st.success(f"Dataset loaded: **{len(categories)}** kategori, **{sum(img_counts.values())}** gambar total")
+            st.success(f"Dataset: **{len(categories)}** kategori, **{sum(img_counts.values())}** gambar")
 
             if HAS_PD:
-                df_cats = pd.DataFrame({"Kategori": categories, "Jumlah Gambar": [img_counts[c] for c in categories]})
+                df_cats = pd.DataFrame({"Kategori": categories, "Jumlah": [img_counts[c] for c in categories]})
                 st.dataframe(df_cats, use_container_width=True)
 
-            # Training params
-            st.markdown("### \u2699\ufe0f Parameter Training")
+            st.markdown("### \u2699\ufe0f Parameter")
             c1, c2, c3 = st.columns(3)
-            with c1: base_model = st.selectbox("Base Model:", list(PRETRAINED_MODELS.keys()), key="train_base")
-            with c2: epochs = st.slider("Epochs:", 1, 50, 10); batch_size = st.selectbox("Batch Size:", [8, 16, 32, 64], index=1)
-            with c3: lr = st.select_slider("Learning Rate:", [0.0001, 0.0005, 0.001, 0.005, 0.01], value=0.001); freeze = st.checkbox("Freeze base layers", value=True)
+            with c1:
+                base_model = st.selectbox("Base Model:", list(PRETRAINED_MODELS.keys()), key="train_base")
+            with c2:
+                epochs = st.slider("Epochs:", 1, 50, 10)
+                batch_size = st.selectbox("Batch Size:", [8, 16, 32, 64], index=1)
+            with c3:
+                lr = st.select_slider("Learning Rate:", [0.0001, 0.0005, 0.001, 0.005, 0.01], value=0.001)
+                freeze = st.checkbox("Freeze base", value=True)
             val_split = st.slider("Validation Split:", 0.1, 0.4, 0.2, 0.05)
             augment = st.checkbox("Data Augmentation", value=True)
 
@@ -607,13 +581,11 @@ with tab3:
                 info = PRETRAINED_MODELS[base_model]
                 target_size = info["size"]
 
-                st.markdown("### \U0001f3c3 Training Progress")
+                st.markdown("### \U0001f3c3 Training...")
                 prog_bar = st.progress(0)
                 status_text = st.empty()
-                metrics_placeholder = st.empty()
 
-                # Prepare data
-                status_text.text("Mempersiapkan dataset...")
+                status_text.text("Mempersiapkan data...")
                 if augment:
                     train_gen = keras.preprocessing.image.ImageDataGenerator(
                         preprocessing_function=info["preprocess"],
@@ -642,121 +614,123 @@ with tab3:
                 model = build_transfer_model(base_model, num_classes, freeze_base=freeze)
                 model.compile(optimizer=Adam(learning_rate=lr), loss="categorical_crossentropy", metrics=["accuracy"])
 
-                # Custom callback for Streamlit progress
-                class StreamlitCallback(keras.callbacks.Callback):
+                class StreamlitCB(keras.callbacks.Callback):
                     def on_epoch_end(self, epoch, logs=None):
                         prog_bar.progress((epoch + 1) / epochs)
-                        status_text.text(f"Epoch {epoch+1}/{epochs} — acc: {logs['accuracy']:.4f} — val_acc: {logs.get('val_accuracy', 0):.4f}")
+                        acc = logs.get("accuracy", 0)
+                        val_acc = logs.get("val_accuracy", 0)
+                        status_text.text(f"Epoch {epoch+1}/{epochs} — acc: {acc:.4f} — val_acc: {val_acc:.4f}")
                         st.session_state.training_log.append({
-                            "epoch": epoch + 1, "accuracy": logs["accuracy"], "loss": logs["loss"],
-                            "val_accuracy": logs.get("val_accuracy", 0), "val_loss": logs.get("val_loss", 0)
+                            "epoch": epoch+1, "accuracy": acc, "loss": logs.get("loss",0),
+                            "val_accuracy": val_acc, "val_loss": logs.get("val_loss",0)
                         })
 
                 status_text.text("Training dimulai...")
                 early_stop = EarlyStopping(patience=5, restore_best_weights=True, monitor="val_loss")
                 history = model.fit(
                     train_data, validation_data=val_data, epochs=epochs,
-                    callbacks=[StreamlitCallback(), early_stop], verbose=0
+                    callbacks=[StreamlitCB(), early_stop], verbose=0
                 )
 
                 prog_bar.progress(1.0)
-                status_text.text("Training selesai!")
+                status_text.text("Selesai!")
 
-                # Results
                 final_acc = history.history["accuracy"][-1]
                 final_val_acc = history.history.get("val_accuracy", [0])[-1]
 
                 st.markdown(f"""
                 <div class="result-card">
                     <h2>\u2705 Training Selesai!</h2>
-                    <h3>Accuracy: {final_acc*100:.1f}% | Val Accuracy: {final_val_acc*100:.1f}%</h3>
+                    <h3>Accuracy: {final_acc*100:.1f}% | Val: {final_val_acc*100:.1f}%</h3>
                 </div>
                 """, unsafe_allow_html=True)
 
-                # Training curves
                 if HAS_PLOTLY:
                     fig = go.Figure()
-                    fig.add_trace(go.Scatter(y=history.history["accuracy"], name="Train Accuracy", mode="lines+markers"))
-                    fig.add_trace(go.Scatter(y=history.history.get("val_accuracy", []), name="Val Accuracy", mode="lines+markers"))
-                    fig.add_trace(go.Scatter(y=history.history["loss"], name="Train Loss", mode="lines+markers", yaxis="y2"))
-                    fig.add_trace(go.Scatter(y=history.history.get("val_loss", []), name="Val Loss", mode="lines+markers", yaxis="y2"))
-                    fig.update_layout(title="Training Curves", yaxis_title="Accuracy", yaxis2=dict(title="Loss", overlaying="y", side="right"), height=450)
+                    fig.add_trace(go.Scatter(y=history.history["accuracy"], name="Train Acc", mode="lines+markers"))
+                    fig.add_trace(go.Scatter(y=history.history.get("val_accuracy",[]), name="Val Acc", mode="lines+markers"))
+                    fig.update_layout(title="Training Curves", yaxis_title="Accuracy", height=400)
                     st.plotly_chart(fig, use_container_width=True)
 
-                # Save model
-                model_buf = io.BytesIO()
+                    fig2 = go.Figure()
+                    fig2.add_trace(go.Scatter(y=history.history["loss"], name="Train Loss", mode="lines+markers"))
+                    fig2.add_trace(go.Scatter(y=history.history.get("val_loss",[]), name="Val Loss", mode="lines+markers"))
+                    fig2.update_layout(title="Loss Curves", yaxis_title="Loss", height=400)
+                    st.plotly_chart(fig2, use_container_width=True)
+
                 with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
                     model.save(tmp.name)
                     with open(tmp.name, "rb") as mf:
                         model_bytes = mf.read()
 
                 labels_str = "\n".join(class_names)
-
                 c1, c2 = st.columns(2)
-                with c1: st.download_button("\U0001f4be Download Model (.h5)", model_bytes, "trained_model.h5", use_container_width=True)
-                with c2: st.download_button("\U0001f4be Download Labels (.txt)", labels_str, "labels.txt", "text/plain", use_container_width=True)
+                with c1:
+                    st.download_button("\U0001f4be Download Model (.h5)", model_bytes, "trained_model.h5", use_container_width=True)
+                with c2:
+                    st.download_button("\U0001f4be Download Labels (.txt)", labels_str, "labels.txt", "text/plain", use_container_width=True)
 
-                # Store for immediate use
                 st.session_state.custom_model = model
                 st.session_state.custom_categories = class_names
-                st.markdown('<div class="success-box">Model juga tersimpan di session. Pilih mode "Custom Model" di sidebar untuk langsung menggunakannya!</div>', unsafe_allow_html=True)
+                st.markdown('<div class="success-box">Model tersimpan di session! Pilih "Custom Model" di sidebar untuk langsung menggunakannya.</div>', unsafe_allow_html=True)
 
 # ===================== TAB 4: HISTORY =====================
 with tab4:
     st.markdown("## \U0001f4c8 History & Analisis")
 
     if st.session_state.classification_history:
-        history = st.session_state.classification_history
+        history_data = st.session_state.classification_history
 
-        # Summary metrics
         c1, c2, c3, c4 = st.columns(4)
-        with c1: st.markdown(f'<div class="metric-card"><h4>Total</h4><h3>{len(history)}</h3></div>', unsafe_allow_html=True)
-        avg_conf = np.mean([h["confidence"] for h in history])
-        with c2: st.markdown(f'<div class="metric-card"><h4>Avg Confidence</h4><h3>{avg_conf*100:.1f}%</h3></div>', unsafe_allow_html=True)
-        avg_time = np.mean([h["elapsed"] for h in history])
-        with c3: st.markdown(f'<div class="metric-card"><h4>Avg Time</h4><h3>{avg_time:.2f}s</h3></div>', unsafe_allow_html=True)
-        unique_cats = len(set(h["top_prediction"] for h in history))
-        with c4: st.markdown(f'<div class="metric-card"><h4>Unique Categories</h4><h3>{unique_cats}</h3></div>', unsafe_allow_html=True)
+        with c1:
+            st.markdown(f'<div class="metric-card"><h4>Total</h4><h3>{len(history_data)}</h3></div>', unsafe_allow_html=True)
+        avg_conf = np.mean([h["confidence"] for h in history_data])
+        with c2:
+            st.markdown(f'<div class="metric-card"><h4>Avg Confidence</h4><h3>{avg_conf*100:.1f}%</h3></div>', unsafe_allow_html=True)
+        avg_time = np.mean([h["elapsed"] for h in history_data])
+        with c3:
+            st.markdown(f'<div class="metric-card"><h4>Avg Time</h4><h3>{avg_time:.2f}s</h3></div>', unsafe_allow_html=True)
+        unique_cats = len(set(h["top_prediction"] for h in history_data))
+        with c4:
+            st.markdown(f'<div class="metric-card"><h4>Categories</h4><h3>{unique_cats}</h3></div>', unsafe_allow_html=True)
 
-        # Table
         if HAS_PD:
             df_hist = pd.DataFrame([{
                 "Waktu": h["timestamp"], "Model": h["model"],
                 "Prediksi": h["top_prediction"], "Confidence": f"{h['confidence']*100:.1f}%",
                 "Waktu Proses": f"{h['elapsed']:.2f}s"
-            } for h in history])
+            } for h in history_data])
             st.dataframe(df_hist, use_container_width=True)
 
-        # Distribution chart
         if HAS_PLOTLY:
-            cats = [h["top_prediction"] for h in history]
+            cats = [h["top_prediction"] for h in history_data]
             cat_counts = {}
             for c in cats:
                 cat_counts[c] = cat_counts.get(c, 0) + 1
             c1, c2 = st.columns(2)
             with c1:
-                fig = px.bar(x=list(cat_counts.keys()), y=list(cat_counts.values()), title="Distribusi Prediksi", labels={"x":"Kategori","y":"Jumlah"})
+                fig = px.bar(x=list(cat_counts.keys()), y=list(cat_counts.values()),
+                    title="Distribusi Prediksi", labels={"x":"Kategori","y":"Jumlah"})
                 st.plotly_chart(fig, use_container_width=True)
             with c2:
-                confs = [h["confidence"]*100 for h in history]
+                confs = [h["confidence"]*100 for h in history_data]
                 fig = px.histogram(x=confs, nbins=20, title="Distribusi Confidence", labels={"x":"Confidence (%)"})
                 st.plotly_chart(fig, use_container_width=True)
 
-        # Export
         if HAS_PD:
-            csv_buf = io.StringIO(); df_hist.to_csv(csv_buf, index=False)
-            st.download_button("\U0001f4be Download History CSV", csv_buf.getvalue(), "classification_history.csv", "text/csv", use_container_width=True)
+            csv_buf = io.StringIO()
+            df_hist.to_csv(csv_buf, index=False)
+            st.download_button("\U0001f4be Download CSV", csv_buf.getvalue(), "history.csv", "text/csv", use_container_width=True)
     else:
-        st.info("Belum ada history klasifikasi. Mulai klasifikasi gambar di tab pertama!")
+        st.info("Belum ada history. Mulai klasifikasi gambar di tab pertama!")
 
 # ===================== TAB 5: PANDUAN =====================
 with tab5:
     st.markdown("## \u2139\ufe0f Panduan Penggunaan")
-
     st.markdown("""
     ### \U0001f680 Quick Start
-    1. **Upload gambar** di tab "Klasifikasi"
-    2. Klik **"Klasifikasi Sekarang!"**
+    1. **Upload gambar** di tab Klasifikasi
+    2. Klik **Klasifikasi Sekarang!**
     3. Lihat hasil prediksi + confidence score
 
     ### \U0001f916 Model yang Tersedia
@@ -772,48 +746,38 @@ with tab5:
 
     ### \U0001f3af Mode Klasifikasi
 
-    **1. ImageNet (1000 Kategori)**
-    - Langsung pakai tanpa training
-    - Mengenali 1000 kategori: hewan, kendaraan, benda, makanan, dll.
+    **1. ImageNet (1000 Kategori)** — langsung pakai, mengenali 1000 objek umum
 
-    **2. Preset Kategori**
-    - Template siap pakai: bunga, penyakit tulang belakang, X-Ray paru, dll.
-    - Cocok untuk demo cepat
+    **2. Preset Kategori** — template siap pakai:
+    - \U0001f338 Bunga: Daisy, Dandelion, Rose, Sunflower, Tulip
+    - \U0001f9b4 Tulang Belakang: Normal, Kifosis, Lordosis, Skoliosis
+    - \U0001f3e5 X-Ray Paru: Normal, Pneumonia, COVID-19, TB
+    - \U0001f431 Hewan, \U0001f34e Buah, \U0001f697 Kendaraan, \u270d\ufe0f Digit
 
-    **3. Custom Model**
-    - Upload model `.h5` yang sudah dilatih sendiri
-    - Atau latih model baru di tab "Training"!
+    **3. Custom Model** — upload model `.h5` sendiri atau latih model baru
 
-    ### \U0001f3eb Cara Training Custom Model
+    ### \U0001f3eb Training Custom Model
     1. Siapkan dataset dalam format folder:
     ```
     dataset/
-    \u251c\u2500\u2500 kategori_1/
-    \u2502   \u251c\u2500\u2500 img1.jpg
-    \u2502   \u2514\u2500\u2500 img2.jpg
-    \u251c\u2500\u2500 kategori_2/
-    \u2502   \u251c\u2500\u2500 img1.jpg
-    \u2502   \u2514\u2500\u2500 img2.jpg
+    \u251c\u2500\u2500 kategori_1/ (img1.jpg, img2.jpg, ...)
+    \u251c\u2500\u2500 kategori_2/ (img1.jpg, img2.jpg, ...)
     ```
     2. ZIP folder tersebut
-    3. Upload di tab "Training"
-    4. Pilih parameter dan klik Train
-    5. Download model hasil training
+    3. Upload di tab Training \u2192 pilih parameter \u2192 Train!
+    4. Download model `.h5` + `labels.txt`
 
     ### \U0001f525 Grad-CAM
-    Grad-CAM menunjukkan **area mana** pada gambar yang paling berpengaruh terhadap keputusan AI.
-    - **Merah/Kuning**: area paling penting
-    - **Biru/Hijau**: area kurang penting
+    Menunjukkan **area gambar** yang paling berpengaruh terhadap keputusan AI.
+    - **Merah/Kuning** = area penting
+    - **Biru/Hijau** = area kurang penting
 
     ### \U0001f4a1 Tips
-    - Gunakan gambar dengan **resolusi cukup** (minimal 224x224 px)
-    - Pastikan objek **terlihat jelas** di gambar
-    - Untuk custom model, semakin banyak data training = semakin akurat
-    - Gunakan **Data Augmentation** saat training untuk meningkatkan generalisasi
+    - Gunakan gambar resolusi cukup (min 224x224 px)
+    - Objek harus terlihat jelas
+    - Untuk training: semakin banyak data = semakin akurat
+    - Aktifkan **Data Augmentation** untuk generalisasi lebih baik
     """)
 
-# ============================================================
-# FOOTER
-# ============================================================
 st.markdown("---")
 st.markdown('<div style="text-align:center;color:#888;font-size:0.85rem">\U0001f9e0 AI Image Classifier \u2022 TensorFlow/Keras \u2022 Transfer Learning \u2022 Grad-CAM</div>', unsafe_allow_html=True)
