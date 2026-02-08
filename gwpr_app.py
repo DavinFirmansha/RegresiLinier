@@ -72,6 +72,19 @@ def compute_poisson_pseudo_r2(y, mu):
     ll_n = np.sum(ys * np.log(mn) - mn - gammaln(ys + 1))
     return 1 - ll_m / ll_n if ll_n != 0 else 0.0
 
+def calc_deviance_residuals(y, mu):
+    """Manual deviance residuals: sign(y-mu)*sqrt(2*(y*log(y/mu)-(y-mu)))"""
+    y = np.asarray(y, dtype=float).flatten()
+    mu = np.maximum(np.asarray(mu, dtype=float).flatten(), 1e-10)
+    term = np.where(y > 0, y * np.log(y / mu), 0.0) - (y - mu)
+    return np.sign(y - mu) * np.sqrt(np.maximum(2 * term, 0))
+
+def calc_pearson_residuals(y, mu):
+    """Manual Pearson residuals: (y-mu)/sqrt(mu)"""
+    y = np.asarray(y, dtype=float).flatten()
+    mu = np.maximum(np.asarray(mu, dtype=float).flatten(), 1e-10)
+    return (y - mu) / np.sqrt(mu)
+
 def generate_demo_data(scenario):
     np.random.seed(42)
     if scenario == "Kasus DBD (Dengue Fever)":
@@ -113,9 +126,6 @@ def generate_demo_data(scenario):
         df=pd.DataFrame({'ID':[f'Loc_{i+1}' for i in range(n)],'Longitude':np.round(lon,4),'Latitude':np.round(lat,4),'Y_Count':y,'X1':np.round(x1,2),'X2':np.round(x2,2)})
         return df,"Y_Count",["X1","X2"],"Longitude","Latitude"
 
-# ============================================================
-# HEADER & SIDEBAR
-# ============================================================
 st.markdown('<div class="main-header">\U0001f9a0 GWPR Analysis Suite</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">Geographically Weighted Poisson Regression</div>', unsafe_allow_html=True)
 
@@ -175,9 +185,7 @@ if st.session_state.data is None:
 df = st.session_state.data
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Data Explorer","Uji Asumsi","Poisson GLM","GWPR Model","Perbandingan","Peta","Laporan"])
 
-# ============================================================
-# TAB 1: DATA EXPLORER
-# ============================================================
+# TAB 1
 with tab1:
     st.markdown("## Data Explorer")
     c1,c2,c3,c4 = st.columns(4)
@@ -212,16 +220,13 @@ with tab1:
         else: st.markdown(f'<div class="success-box">Dispersi wajar: Var/Mean={dr:.2f}</div>',unsafe_allow_html=True)
     if st.session_state.lon_col and st.session_state.lat_col:
         fm=px.scatter_mapbox(df,lon=st.session_state.lon_col,lat=st.session_state.lat_col,color=st.session_state.dep_var,size_max=15,zoom=6,mapbox_style="open-street-map",color_continuous_scale="Viridis")
-        fm.update_layout(height=500)
-        st.plotly_chart(fm,use_container_width=True)
+        fm.update_layout(height=500); st.plotly_chart(fm,use_container_width=True)
     nc=df.select_dtypes(include=[np.number]).columns.tolist()
     cv=[st.session_state.dep_var]+st.session_state.indep_vars if st.session_state.dep_var else nc
     cv=[v for v in cv if v in df.columns]
     st.plotly_chart(px.imshow(df[cv].corr(),text_auto=".3f",color_continuous_scale="RdBu_r",aspect="auto",zmin=-1,zmax=1).update_layout(height=500),use_container_width=True)
 
-# ============================================================
-# TAB 2: UJI ASUMSI
-# ============================================================
+# TAB 2
 with tab2:
     st.markdown("## Uji Asumsi Poisson")
     if st.session_state.dep_var and st.session_state.indep_vars:
@@ -258,7 +263,7 @@ with tab2:
         Xc=sm.add_constant(Xd)
         try:
             pg=smPoisson(yd,Xc).fit(disp=0); mh=pg.predict(Xc)
-            pr=(yd-mh)/np.sqrt(mh); pchi=np.sum(pr**2); dp=pchi/(len(yd)-len(pg.params))
+            pr=calc_pearson_residuals(yd,mh); pchi=np.sum(pr**2); dp=pchi/(len(yd)-len(pg.params))
             c1,c2=st.columns(2)
             with c1:
                 st.write(f"Pearson Chi2={pchi:.4f}, df={len(yd)-len(pg.params)}, Disp={dp:.4f}")
@@ -298,9 +303,7 @@ with tab2:
         except Exception as e: st.warning(str(e))
     else: st.warning("Pilih variabel terlebih dahulu!")
 
-# ============================================================
-# TAB 3: POISSON GLM
-# ============================================================
+# TAB 3
 with tab3:
     st.markdown("## Poisson Global (GLM)")
     if st.session_state.dep_var and st.session_state.indep_vars:
@@ -350,17 +353,19 @@ with tab3:
             st.markdown(f"**{eq}**")
             with st.expander("Full Summary"): st.text(pm.summary().as_text())
             st.markdown("### Diagnostics")
+            dev_resid = calc_deviance_residuals(yp, mh)
+            pear_resid = calc_pearson_residuals(yp, mh)
             c1,c2=st.columns(2)
             with c1:
                 ff=px.scatter(x=mh,y=yp,title="Actual vs Predicted",labels={'x':'Predicted','y':'Actual'},color_discrete_sequence=["#8E44AD"])
                 ff.add_trace(go.Scatter(x=[min(mh.min(),yp.min()),max(mh.max(),yp.max())],y=[min(mh.min(),yp.min()),max(mh.max(),yp.max())],mode='lines',line=dict(color='red',dash='dash'),name='Perfect'))
                 st.plotly_chart(ff,use_container_width=True)
             with c2:
-                fd=px.scatter(x=mh,y=pm.resid_deviance,title="Deviance Resid",labels={'x':'Predicted','y':'Dev Resid'},color_discrete_sequence=["#E74C3C"])
+                fd=px.scatter(x=mh,y=dev_resid,title="Deviance Resid",labels={'x':'Predicted','y':'Dev Resid'},color_discrete_sequence=["#E74C3C"])
                 fd.add_hline(y=0,line_dash="dash"); fd.add_hline(y=2,line_dash="dot",line_color="orange"); fd.add_hline(y=-2,line_dash="dot",line_color="orange")
                 st.plotly_chart(fd,use_container_width=True)
             c1,c2=st.columns(2)
-            with c1: st.plotly_chart(px.histogram(x=pm.resid_pearson,nbins=30,title="Pearson Resid",marginal="box",color_discrete_sequence=["#27AE60"]),use_container_width=True)
+            with c1: st.plotly_chart(px.histogram(x=pear_resid,nbins=30,title="Pearson Resid",marginal="box",color_discrete_sequence=["#27AE60"]),use_container_width=True)
             with c2:
                 from scipy.stats import poisson as pdist
                 cr=np.arange(0,min(int(yp.max())+1,50))
@@ -374,9 +379,7 @@ with tab3:
             st.error(str(e)); import traceback; st.code(traceback.format_exc())
     else: st.warning("Pilih variabel!")
 
-# ============================================================
-# TAB 4: GWPR
-# ============================================================
+# TAB 4
 with tab4:
     st.markdown("## GWPR Model")
     if st.session_state.dep_var and st.session_state.indep_vars:
@@ -457,7 +460,7 @@ with tab4:
                 fg.add_trace(go.Scatter(x=[min(mg.min(),ya.min()),max(mg.max(),ya.max())],y=[min(mg.min(),ya.min()),max(mg.max(),ya.max())],mode='lines',line=dict(color='red',dash='dash'),name='Perfect'))
                 st.plotly_chart(fg,use_container_width=True)
             with c2:
-                sr=(ya-mg)/np.sqrt(mg)
+                sr=calc_pearson_residuals(ya,mg)
                 fs=px.scatter(x=mg,y=sr,title="Std Pearson Resid",labels={'x':'Predicted','y':'Resid'},color_discrete_sequence=["#E74C3C"])
                 fs.add_hline(y=0,line_dash="dash"); fs.add_hline(y=2,line_dash="dot",line_color="orange"); fs.add_hline(y=-2,line_dash="dot",line_color="orange")
                 st.plotly_chart(fs,use_container_width=True)
@@ -465,15 +468,13 @@ with tab4:
             edf=df.copy()
             for i,v in enumerate(vn):
                 edf[f'Beta_{v}']=pa[:,i]; edf[f'IRR_{v}']=np.exp(pa[:,i]); edf[f'SE_{v}']=se[:,i]; edf[f'tval_{v}']=tv[:,i]; edf[f'Sig_{v}']=np.where(np.abs(tv[:,i])>1.96,'Yes','No')
-            edf['Predicted']=mg; edf['Residual']=ya-mg; edf['Pearson_Resid']=(ya-mg)/np.sqrt(mg)
+            edf['Predicted']=mg; edf['Residual']=ya-mg; edf['Pearson_Resid']=calc_pearson_residuals(ya,mg)
             buf=io.StringIO(); edf.to_csv(buf,index=False)
             fname_gwpr = "gwpr_params_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".csv"
             st.download_button("Download GWPR Params (CSV)",buf.getvalue(),fname_gwpr,"text/csv",use_container_width=True)
     else: st.warning("Pilih variabel!")
 
-# ============================================================
-# TAB 5: PERBANDINGAN
-# ============================================================
+# TAB 5
 with tab5:
     st.markdown("## Perbandingan Model")
     hp=st.session_state.poisson_results is not None; hg=st.session_state.gwpr_results is not None
@@ -483,19 +484,19 @@ with tab5:
         cd=[]
         if hp:
             pois=st.session_state.poisson_results; mp=pois.predict(sm.add_constant(df[indeps].values))
-            dp=compute_poisson_deviance(ya,mp); pp=compute_poisson_pseudo_r2(ya,mp)
-            cd.append({'Model':'Global','PseudoR2':f"{pp:.6f}",'AIC':f"{pois.aic:.4f}",'AICc':f"{st.session_state.get('poisson_aicc',pois.aic):.4f}",'BIC':f"{pois.bic:.4f}",'Deviance':f"{dp:.4f}",'LogLik':f"{pois.llf:.4f}"})
+            dp_v=compute_poisson_deviance(ya,mp); pp_v=compute_poisson_pseudo_r2(ya,mp)
+            cd.append({'Model':'Global','PseudoR2':f"{pp_v:.6f}",'AIC':f"{pois.aic:.4f}",'AICc':f"{st.session_state.get('poisson_aicc',pois.aic):.4f}",'BIC':f"{pois.bic:.4f}",'Deviance':f"{dp_v:.4f}",'LogLik':f"{pois.llf:.4f}"})
         if hg:
             gw=st.session_state.gwpr_results; mgw=np.maximum(gw.predy.flatten(),1e-10)
-            dg=compute_poisson_deviance(ya,mgw); pg=compute_poisson_pseudo_r2(ya,mgw)
-            cd.append({'Model':'GWPR','PseudoR2':f"{pg:.6f}",'AIC':f"{gw.aic:.4f}",'AICc':f"{gw.aicc:.4f}",'Deviance':f"{dg:.4f}"})
+            dg_v=compute_poisson_deviance(ya,mgw); pg_v=compute_poisson_pseudo_r2(ya,mgw)
+            cd.append({'Model':'GWPR','PseudoR2':f"{pg_v:.6f}",'AIC':f"{gw.aic:.4f}",'AICc':f"{gw.aicc:.4f}",'Deviance':f"{dg_v:.4f}"})
         st.dataframe(pd.DataFrame(cd),use_container_width=True)
         if hp and hg:
             ap=st.session_state.get('poisson_aicc',pois.aic); ag=gw.aicc; da=ap-ag
             c1,c2,c3=st.columns(3)
             with c1: st.metric("Delta AIC",f"{pois.aic-gw.aic:.4f}")
             with c2: st.metric("Delta AICc",f"{da:.4f}")
-            with c3: st.metric("Dev Improve",f"{((dp-dg)/dp*100) if dp>0 else 0:.2f}%")
+            with c3: st.metric("Dev Improve",f"{((dp_v-dg_v)/dp_v*100) if dp_v>0 else 0:.2f}%")
             if da>2: st.markdown(f'<div class="success-box"><b>GWPR lebih baik!</b> Delta AICc={da:.2f}>2</div>',unsafe_allow_html=True)
             elif da>0: st.markdown(f'<div class="warning-box"><b>GWPR sedikit lebih baik.</b> Delta={da:.2f}</div>',unsafe_allow_html=True)
             else: st.markdown(f'<div class="info-box"><b>Global cukup.</b> Delta={da:.2f}</div>',unsafe_allow_html=True)
@@ -507,9 +508,11 @@ with tab5:
         st.plotly_chart(fp,use_container_width=True)
         rd=[]
         if hp:
-            for r in (ya-mp)/np.sqrt(np.maximum(mp,1e-10)): rd.append({'Model':'Global','PR':r})
+            rp=calc_pearson_residuals(ya,mp)
+            for r in rp: rd.append({'Model':'Global','PR':r})
         if hg:
-            for r in (ya-mgw)/np.sqrt(mgw): rd.append({'Model':'GWPR','PR':r})
+            rg=calc_pearson_residuals(ya,mgw)
+            for r in rg: rd.append({'Model':'GWPR','PR':r})
         if rd: st.plotly_chart(px.box(pd.DataFrame(rd),x='Model',y='PR',color='Model',title="Pearson Residual"),use_container_width=True)
         md=[]
         if hp: md.append({'Model':'Global','RMSE':f"{np.sqrt(np.mean((ya-mp)**2)):.4f}",'MAE':f"{np.mean(np.abs(ya-mp)):.4f}"})
@@ -520,9 +523,7 @@ with tab5:
             with c1: st.plotly_chart(px.scatter_mapbox(df,lon=st.session_state.lon_col,lat=st.session_state.lat_col,color=ya-mp,size=np.abs(ya-mp),size_max=15,zoom=6,mapbox_style="open-street-map",title="Resid Global",color_continuous_scale="RdBu_r",color_continuous_midpoint=0).update_layout(height=400),use_container_width=True)
             with c2: st.plotly_chart(px.scatter_mapbox(df,lon=st.session_state.lon_col,lat=st.session_state.lat_col,color=ya-mgw,size=np.abs(ya-mgw),size_max=15,zoom=6,mapbox_style="open-street-map",title="Resid GWPR",color_continuous_scale="RdBu_r",color_continuous_midpoint=0).update_layout(height=400),use_container_width=True)
 
-# ============================================================
-# TAB 6: PETA
-# ============================================================
+# TAB 6
 with tab6:
     st.markdown("## Visualisasi Peta")
     if not FOLIUM_AVAILABLE:
@@ -538,14 +539,14 @@ with tab6:
             mm=st.selectbox("Model:",mo,key="map_model"); vn=['Intercept']+indeps; gdf=df.copy()
             if mm=="Global":
                 mu=st.session_state.poisson_results.predict(sm.add_constant(df[indeps].values))
-                gdf['Predicted']=mu; gdf['Residual']=df[dep].values-mu; gdf['PR']=gdf['Residual']/np.sqrt(np.maximum(mu,1e-10))
+                gdf['Predicted']=mu; gdf['Residual']=df[dep].values-mu; gdf['PR']=calc_pearson_residuals(df[dep].values,mu)
             else:
                 gw=st.session_state.gwpr_results
                 for i,v in enumerate(vn):
                     gdf[f'B_{v}']=gw.params[:,i]; gdf[f'IRR_{v}']=np.exp(gw.params[:,i]); gdf[f't_{v}']=gw.tvalues[:,i]
                     gdf[f'Sig_{v}']=np.where(np.abs(gw.tvalues[:,i])>1.96,'Sig','No')
                 mu=gw.predy.flatten()
-                gdf['Predicted']=mu; gdf['Residual']=df[dep].values-mu; gdf['PR']=gdf['Residual']/np.sqrt(np.maximum(mu,1e-10))
+                gdf['Predicted']=mu; gdf['Residual']=df[dep].values-mu; gdf['PR']=calc_pearson_residuals(df[dep].values,mu)
             lo=["Predicted vs Observed","Residual (Pearson)"]
             if mm=="GWPR":
                 for v in vn: lo+=[f"Beta: {v}",f"IRR: {v}",f"t-stat: {v}"]
@@ -599,9 +600,7 @@ with tab6:
             st_folium(m,width=1200,height=600)
     else: st.warning("Pilih variabel!")
 
-# ============================================================
-# TAB 7: LAPORAN & EXPORT
-# ============================================================
+# TAB 7
 with tab7:
     st.markdown("## Laporan & Export")
     if st.session_state.dep_var and st.session_state.indep_vars:
@@ -611,15 +610,15 @@ with tab7:
         yv=df[dep].values
         rl+=["2. DESKRIPSI Y",f"   Mean={yv.mean():.4f}, Var={yv.var():.4f}, Var/Mean={yv.var()/max(yv.mean(),1e-10):.4f}",f"   Range=({yv.min()},{yv.max()}), Zeros={np.sum(yv==0)}",""]
         if st.session_state.poisson_results is not None:
-            p=st.session_state.poisson_results; mp=p.predict(sm.add_constant(df[indeps].values))
-            rl+=["3. POISSON GLOBAL",f"   AIC={p.aic:.4f}, BIC={p.bic:.4f}, LogLik={p.llf:.4f}",f"   Dev={compute_poisson_deviance(yv,mp):.4f}, R2={compute_poisson_pseudo_r2(yv,mp):.6f}","   Koefisien:"]
+            p=st.session_state.poisson_results; mp_r=p.predict(sm.add_constant(df[indeps].values))
+            rl+=["3. POISSON GLOBAL",f"   AIC={p.aic:.4f}, BIC={p.bic:.4f}, LogLik={p.llf:.4f}",f"   Dev={compute_poisson_deviance(yv,mp_r):.4f}, R2={compute_poisson_pseudo_r2(yv,mp_r):.6f}","   Koefisien:"]
             for i,v in enumerate(['Intercept']+indeps):
                 sig="*" if p.pvalues[i]<0.05 else ""
                 rl.append(f"   {v:20s} B={p.params[i]:.6f} IRR={np.exp(p.params[i]):.4f} p={p.pvalues[i]:.4f}{sig}")
             rl.append("")
         if st.session_state.gwpr_results is not None:
-            g=st.session_state.gwpr_results; mg=np.maximum(g.predy.flatten(),1e-10)
-            rl+=["4. GWPR",f"   BW={st.session_state.gwpr_bw}, AICc={g.aicc:.4f}",f"   Dev={compute_poisson_deviance(yv,mg):.4f}, R2={compute_poisson_pseudo_r2(yv,mg):.6f}","   Koefisien Lokal:"]
+            g=st.session_state.gwpr_results; mg_r=np.maximum(g.predy.flatten(),1e-10)
+            rl+=["4. GWPR",f"   BW={st.session_state.gwpr_bw}, AICc={g.aicc:.4f}",f"   Dev={compute_poisson_deviance(yv,mg_r):.4f}, R2={compute_poisson_pseudo_r2(yv,mg_r):.6f}","   Koefisien Lokal:"]
             vnl=['Intercept']+indeps
             for i,v in enumerate(vnl):
                 ns=np.sum(np.abs(g.tvalues[:,i])>1.96); ps=100*ns/len(g.tvalues)
@@ -631,16 +630,15 @@ with tab7:
         rl+=["INTERPRETASI","- IRR=exp(B): >1=meningkatkan, <1=menurunkan count","- |t|>1.96 = signifikan (alpha=5%)"]
         rt="\n".join(rl)
         st.text_area("Preview",rt,height=400)
-        fname_report = "laporan_GWPR_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".txt"
-        st.download_button("Download Laporan (.txt)",rt,fname_report,"text/plain",use_container_width=True)
+        fname_rpt = "laporan_GWPR_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".txt"
+        st.download_button("Download Laporan (.txt)",rt,fname_rpt,"text/plain",use_container_width=True)
         st.markdown("### Export Konfigurasi")
         cfg={"analysis":"GWPR","timestamp":datetime.now().isoformat(),"data":{"n":len(df),"dep":dep,"indep":indeps,"lon":st.session_state.lon_col,"lat":st.session_state.lat_col}}
         if st.session_state.poisson_results is not None:
             p=st.session_state.poisson_results
             cfg["global"]={"aic":float(p.aic),"bic":float(p.bic),"params":{v:float(p.params[i]) for i,v in enumerate(['Intercept']+indeps)}}
         if st.session_state.gwpr_results is not None:
-            g=st.session_state.gwpr_results
-            bwv=st.session_state.gwpr_bw
+            g=st.session_state.gwpr_results; bwv=st.session_state.gwpr_bw
             cfg["gwpr"]={"bw":float(bwv) if isinstance(bwv,(int,float,np.floating)) else str(bwv),"aicc":float(g.aicc),"aic":float(g.aic)}
         cj=json.dumps(cfg,indent=2,default=str)
         fname_cfg = "gwpr_config_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".json"
@@ -652,9 +650,9 @@ with tab7:
                 edf[f'Beta_{v}']=g.params[:,i]; edf[f'IRR_{v}']=np.exp(g.params[:,i])
                 edf[f'SE_{v}']=g.bse[:,i]; edf[f'tval_{v}']=g.tvalues[:,i]
                 edf[f'Sig_{v}']=np.where(np.abs(g.tvalues[:,i])>1.96,'Yes','No')
-            mu=g.predy.flatten()
-            edf['Predicted']=mu; edf['Residual']=df[dep].values-mu
-            edf['Pearson_Resid']=(df[dep].values-mu)/np.sqrt(np.maximum(mu,1e-10))
+            mu_e=g.predy.flatten()
+            edf['Predicted']=mu_e; edf['Residual']=df[dep].values-mu_e
+            edf['Pearson_Resid']=calc_pearson_residuals(df[dep].values,mu_e)
             buf=io.StringIO(); edf.to_csv(buf,index=False)
             fname_full = "gwpr_full_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".csv"
             st.download_button("Download Full (CSV)",buf.getvalue(),fname_full,"text/csv",use_container_width=True)
