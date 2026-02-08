@@ -11,3 +11,4 @@ matplotlib>=3.7.0
 folium
 libpysal
 esda
+mgwr
