@@ -35,6 +35,7 @@ from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_s
     cohen_kappa_score, balanced_accuracy_score, log_loss)
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from sklearn.pipeline import Pipeline
+from scipy.stats import binomtest
 
 try:
     from imblearn.over_sampling import SMOTE, ADASYN, BorderlineSMOTE, RandomOverSampler
@@ -53,22 +54,21 @@ try:
 except ImportError: HAS_CAT=False
 
 warnings.filterwarnings("ignore")
-st.set_page_config(page_title="ML Classification Suite",page_icon="\U0001f916",layout="wide",initial_sidebar_state="expanded")
+st.set_page_config(page_title="ML Classification Suite",page_icon="\U0001f916",layout="wide")
 st.markdown("""<style>
 .main-header{font-size:2.5rem;font-weight:700;background:linear-gradient(135deg,#8E2DE2,#4A00E0);-webkit-background-clip:text;-webkit-text-fill-color:transparent;text-align:center;padding:1rem 0}
 .sub-header{font-size:1.1rem;color:#5D6D7E;text-align:center;margin-bottom:2rem}
 .success-box{background:#D5F5E3;border-left:5px solid #27AE60;padding:1rem;border-radius:5px;margin:.5rem 0}.success-box,.success-box *{color:#145a32!important}
-.warning-box{background:#FEF9E7;border-left:5px solid #F39C12;padding:1rem;border-radius:5px;margin:.5rem 0}.warning-box,.warning-box *{color:#7d6608!important}
-.error-box{background:#FADBD8;border-left:5px solid #E74C3C;padding:1rem;border-radius:5px;margin:.5rem 0}.error-box,.error-box *{color:#78281f!important}
-.info-box{background:#D6EAF8;border-left:5px solid #2E86C1;padding:1rem;border-radius:5px;margin:.5rem 0}.info-box,.info-box *{color:#1a4971!important}
 .metric-card{background:linear-gradient(135deg,#667eea,#764ba2);padding:1.5rem;border-radius:10px;text-align:center;color:white!important;margin:.5rem 0}.metric-card *{color:white!important}
+.info-box{background:#D6EAF8;border-left:5px solid #2E86C1;padding:1rem;border-radius:5px;margin:.5rem 0}.info-box,.info-box *{color:#1a4971!important}
 </style>""",unsafe_allow_html=True)
+
 defaults={"data":None,"X":None,"y":None,"X_train":None,"X_test":None,"y_train":None,"y_test":None,
     "feature_names":[],"target_name":"","class_names":[],"preprocessing_done":False,
-    "model_results":{},"best_models":{},"comparison_df":None,"all_predictions":{},
-    "selected_models":[],"hp_configs":{},"trained_models":{}}
+    "model_results":{},"comparison_df":None,"all_predictions":{},"hp_configs":{},"trained_models":{}}
 for k,v in defaults.items():
     if k not in st.session_state: st.session_state[k]=v
+
 def safe_metric(y_true, y_pred, y_prob, avg="weighted", n_classes=2):
     m={}
     m["accuracy"]=accuracy_score(y_true,y_pred)
@@ -91,32 +91,31 @@ def safe_metric(y_true, y_pred, y_prob, avg="weighted", n_classes=2):
         m[f"recall_{a2}"]=recall_score(y_true,y_pred,average=a2,zero_division=0)
         m[f"f1_{a2}"]=f1_score(y_true,y_pred,average=a2,zero_division=0)
     return m
+
 def parse_hidden_layers(s):
     s=str(s).strip().replace("(","").replace(")","").replace(" ","")
-    return tuple(int(x) for x in s.split(",") if x)
+    return tuple(int(x) for x in s.split(",") if x.strip())
+
 def render_hp_widget(hp_name, hp_cfg, model_name, col):
-    key=f"hp_{model_name}_{hp_name}"
-    t=hp_cfg["type"]
+    key=f"hp_{model_name}_{hp_name}";t=hp_cfg["type"]
     with col:
-        if t=="int":
-            return st.number_input(hp_name,min_value=hp_cfg["min"],max_value=hp_cfg["max"],value=hp_cfg["default"],step=1,key=key)
+        if t=="int": return st.number_input(hp_name,min_value=hp_cfg["min"],max_value=hp_cfg["max"],value=hp_cfg["default"],step=1,key=key)
         elif t=="int_none":
-            use_none=st.checkbox(f"{hp_name}=None",value=hp_cfg["default"] is None,key=key+"_n")
-            if use_none: return None
+            if st.checkbox(f"{hp_name}=None",value=hp_cfg["default"] is None,key=key+"_n"): return None
             return st.number_input(hp_name,min_value=hp_cfg["min"],max_value=hp_cfg["max"],value=hp_cfg.get("default",10) or 10,step=1,key=key)
-        elif t=="float":
-            return st.number_input(hp_name,min_value=float(hp_cfg["min"]),max_value=float(hp_cfg["max"]),value=float(hp_cfg["default"]),format="%.4f",key=key)
+        elif t=="float": return st.number_input(hp_name,min_value=float(hp_cfg["min"]),max_value=float(hp_cfg["max"]),value=float(hp_cfg["default"]),format="%.4f",key=key)
         elif t=="float_log":
             import math;lo=math.log10(max(hp_cfg["min"],1e-15));hi=math.log10(max(hp_cfg["max"],1e-15));df=math.log10(max(hp_cfg["default"],1e-15))
-            v=st.slider(hp_name,lo,hi,df,step=0.1,format="%.2f",key=key);return 10**v
+            return 10**st.slider(hp_name,lo,hi,df,step=0.1,format="%.2f",key=key)
         elif t=="select":
             opts=hp_cfg["options"];dv=hp_cfg["default"];idx=opts.index(dv) if dv in opts else 0
             return st.selectbox(hp_name,opts,index=idx,key=key)
+
 def get_model_registry():
     R={}
     R["Logistic Regression"]={"class":LogisticRegression,"default":{"C":1.0,"max_iter":1000,"solver":"lbfgs","penalty":"l2","random_state":42},"hp":{"C":{"type":"float_log","min":0.001,"max":100.0,"default":1.0},"max_iter":{"type":"int","min":100,"max":5000,"default":1000},"solver":{"type":"select","options":["lbfgs","liblinear","newton-cg","saga"],"default":"lbfgs"},"penalty":{"type":"select","options":["l1","l2","elasticnet","none"],"default":"l2"}}}
     R["Decision Tree"]={"class":DecisionTreeClassifier,"default":{"max_depth":None,"min_samples_split":2,"criterion":"gini","random_state":42},"hp":{"max_depth":{"type":"int_none","min":1,"max":50,"default":None},"min_samples_split":{"type":"int","min":2,"max":50,"default":2},"min_samples_leaf":{"type":"int","min":1,"max":50,"default":1},"criterion":{"type":"select","options":["gini","entropy","log_loss"],"default":"gini"}}}
-    R["Random Forest"]={"class":RandomForestClassifier,"default":{"n_estimators":100,"max_depth":None,"random_state":42},"hp":{"n_estimators":{"type":"int","min":10,"max":1000,"default":100},"max_depth":{"type":"int_none","min":1,"max":50,"default":None},"min_samples_split":{"type":"int","min":2,"max":50,"default":2},"min_samples_leaf":{"type":"int","min":1,"max":50,"default":1},"criterion":{"type":"select","options":["gini","entropy","log_loss"],"default":"gini"}}}
+    R["Random Forest"]={"class":RandomForestClassifier,"default":{"n_estimators":100,"max_depth":None,"random_state":42},"hp":{"n_estimators":{"type":"int","min":10,"max":1000,"default":100},"max_depth":{"type":"int_none","min":1,"max":50,"default":None},"min_samples_split":{"type":"int","min":2,"max":50,"default":2},"criterion":{"type":"select","options":["gini","entropy","log_loss"],"default":"gini"}}}
     R["Extra Trees"]={"class":ExtraTreesClassifier,"default":{"n_estimators":100,"random_state":42},"hp":{"n_estimators":{"type":"int","min":10,"max":1000,"default":100},"max_depth":{"type":"int_none","min":1,"max":50,"default":None},"min_samples_split":{"type":"int","min":2,"max":50,"default":2},"criterion":{"type":"select","options":["gini","entropy","log_loss"],"default":"gini"}}}
     R["Gradient Boosting"]={"class":GradientBoostingClassifier,"default":{"n_estimators":100,"learning_rate":0.1,"max_depth":3,"random_state":42},"hp":{"n_estimators":{"type":"int","min":10,"max":1000,"default":100},"learning_rate":{"type":"float_log","min":0.001,"max":1.0,"default":0.1},"max_depth":{"type":"int","min":1,"max":20,"default":3},"subsample":{"type":"float","min":0.5,"max":1.0,"default":1.0}}}
     R["Hist Gradient Boosting"]={"class":HistGradientBoostingClassifier,"default":{"max_iter":100,"learning_rate":0.1,"random_state":42},"hp":{"max_iter":{"type":"int","min":10,"max":1000,"default":100},"learning_rate":{"type":"float_log","min":0.001,"max":1.0,"default":0.1},"max_depth":{"type":"int_none","min":1,"max":50,"default":None},"min_samples_leaf":{"type":"int","min":1,"max":100,"default":20}}}
@@ -136,29 +135,32 @@ def get_model_registry():
     R["SGD Classifier"]={"class":SGDClassifier,"default":{"loss":"hinge","max_iter":1000,"random_state":42},"hp":{"loss":{"type":"select","options":["hinge","log_loss","modified_huber","perceptron"],"default":"hinge"},"alpha":{"type":"float_log","min":1e-6,"max":1.0,"default":0.0001},"penalty":{"type":"select","options":["l1","l2","elasticnet"],"default":"l2"}}}
     R["Perceptron"]={"class":Perceptron,"default":{"max_iter":1000,"random_state":42},"hp":{"alpha":{"type":"float_log","min":1e-6,"max":1.0,"default":0.0001},"max_iter":{"type":"int","min":100,"max":5000,"default":1000}}}
     R["Passive Aggressive"]={"class":PassiveAggressiveClassifier,"default":{"C":1.0,"max_iter":1000,"random_state":42},"hp":{"C":{"type":"float_log","min":0.001,"max":100.0,"default":1.0},"max_iter":{"type":"int","min":100,"max":5000,"default":1000}}}
-    if HAS_XGB: R["XGBoost"]={"class":XGBClassifier,"default":{"n_estimators":100,"learning_rate":0.1,"max_depth":6,"random_state":42,"use_label_encoder":False,"eval_metric":"logloss"},"hp":{"n_estimators":{"type":"int","min":10,"max":1000,"default":100},"learning_rate":{"type":"float_log","min":0.001,"max":1.0,"default":0.1},"max_depth":{"type":"int","min":1,"max":20,"default":6},"subsample":{"type":"float","min":0.5,"max":1.0,"default":1.0},"colsample_bytree":{"type":"float","min":0.3,"max":1.0,"default":1.0},"gamma":{"type":"float","min":0.0,"max":10.0,"default":0.0},"reg_alpha":{"type":"float_log","min":1e-6,"max":10.0,"default":1e-6},"reg_lambda":{"type":"float_log","min":1e-6,"max":10.0,"default":1.0}}}
-    if HAS_LGBM: R["LightGBM"]={"class":LGBMClassifier,"default":{"n_estimators":100,"learning_rate":0.1,"random_state":42,"verbose":-1},"hp":{"n_estimators":{"type":"int","min":10,"max":1000,"default":100},"learning_rate":{"type":"float_log","min":0.001,"max":1.0,"default":0.1},"max_depth":{"type":"int","min":-1,"max":50,"default":-1},"num_leaves":{"type":"int","min":10,"max":200,"default":31},"subsample":{"type":"float","min":0.5,"max":1.0,"default":1.0},"colsample_bytree":{"type":"float","min":0.3,"max":1.0,"default":1.0}}}
-    if HAS_CAT: R["CatBoost"]={"class":CatBoostClassifier,"default":{"iterations":100,"learning_rate":0.1,"depth":6,"random_state":42,"verbose":0},"hp":{"iterations":{"type":"int","min":10,"max":1000,"default":100},"learning_rate":{"type":"float_log","min":0.001,"max":1.0,"default":0.1},"depth":{"type":"int","min":1,"max":16,"default":6},"l2_leaf_reg":{"type":"float_log","min":1e-6,"max":10.0,"default":3.0}}}
+    if HAS_XGB: R["XGBoost"]={"class":XGBClassifier,"default":{"n_estimators":100,"learning_rate":0.1,"max_depth":6,"random_state":42,"use_label_encoder":False,"eval_metric":"logloss"},"hp":{"n_estimators":{"type":"int","min":10,"max":1000,"default":100},"learning_rate":{"type":"float_log","min":0.001,"max":1.0,"default":0.1},"max_depth":{"type":"int","min":1,"max":20,"default":6},"subsample":{"type":"float","min":0.5,"max":1.0,"default":1.0},"colsample_bytree":{"type":"float","min":0.3,"max":1.0,"default":1.0}}}
+    if HAS_LGBM: R["LightGBM"]={"class":LGBMClassifier,"default":{"n_estimators":100,"learning_rate":0.1,"random_state":42,"verbose":-1},"hp":{"n_estimators":{"type":"int","min":10,"max":1000,"default":100},"learning_rate":{"type":"float_log","min":0.001,"max":1.0,"default":0.1},"max_depth":{"type":"int","min":-1,"max":50,"default":-1},"num_leaves":{"type":"int","min":10,"max":200,"default":31}}}
+    if HAS_CAT: R["CatBoost"]={"class":CatBoostClassifier,"default":{"iterations":100,"learning_rate":0.1,"depth":6,"random_state":42,"verbose":0},"hp":{"iterations":{"type":"int","min":10,"max":1000,"default":100},"learning_rate":{"type":"float_log","min":0.001,"max":1.0,"default":0.1},"depth":{"type":"int","min":1,"max":16,"default":6}}}
     return R
 MODEL_REGISTRY=get_model_registry()
+
 st.markdown('<div class="main-header">\U0001f916 ML Classification Suite</div>',unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Complete Machine Learning Pipeline for Classification</div>',unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Complete ML Pipeline for Classification</div>',unsafe_allow_html=True)
 with st.sidebar:
     st.markdown("## \U0001f4c2 Data Input")
     data_src=st.radio("Source:",["Upload CSV/Excel","Demo Dataset"])
     if data_src=="Demo Dataset":
-        demo_name=st.selectbox("Dataset:",["Iris","Wine","Breast Cancer","Digits (subset)"])
+        demo_name=st.selectbox("Dataset:",["Iris","Wine","Breast Cancer","Digits"])
         from sklearn.datasets import load_iris,load_wine,load_breast_cancer,load_digits
-        d={"Iris":load_iris,"Wine":load_wine,"Breast Cancer":load_breast_cancer,"Digits (subset)":load_digits}[demo_name]()
+        d={"Iris":load_iris,"Wine":load_wine,"Breast Cancer":load_breast_cancer,"Digits":load_digits}[demo_name]()
         demo_df=pd.DataFrame(d.data,columns=d.feature_names);demo_df["target"]=d.target
-        st.session_state.data=demo_df;st.session_state.class_names=[str(c) for c in d.target_names];st.success(f"{demo_name}: {len(demo_df)} samples")
+        st.session_state.data=demo_df;st.session_state.class_names=[str(c) for c in d.target_names];st.success(f"{demo_name}: {len(demo_df)} rows")
     else:
         up=st.file_uploader("Upload:",type=["csv","xlsx","xls"])
         if up:
-            try: df_up=pd.read_csv(up) if up.name.endswith(".csv") else pd.read_excel(up);st.session_state.data=df_up;st.success(f"{len(df_up)} rows")
+            try:
+                df_up=pd.read_csv(up) if up.name.endswith(".csv") else pd.read_excel(up)
+                st.session_state.data=df_up;st.success(f"{len(df_up)} rows")
             except Exception as e: st.error(str(e))
     if st.session_state.data is not None:
-        df=st.session_state.data;all_cols=df.columns.tolist()
+        dfx=st.session_state.data;all_cols=dfx.columns.tolist()
         st.markdown("---");st.markdown("## \U0001f3af Target")
         target_col=st.selectbox("Target:",all_cols,index=len(all_cols)-1);st.session_state.target_name=target_col
         feat_cols=[c for c in all_cols if c!=target_col]
@@ -169,7 +171,8 @@ with st.sidebar:
         stratify_split=st.checkbox("Stratified",value=True)
 if st.session_state.data is None: st.info("Upload data or select demo.");st.stop()
 df=st.session_state.data.copy()
-tab1,tab2,tab3,tab4,tab5,tab6=st.tabs(["\U0001f4ca Data & EDA","\U0001f527 Preprocessing","\U0001f916 Training","\U0001f4c8 Results","\U0001f3c6 Comparison","\U0001f50d Analysis"])
+tab1,tab2,tab3,tab4,tab5,tab6=st.tabs(["\U0001f4ca EDA","\U0001f527 Preprocessing","\U0001f916 Training","\U0001f4c8 Results","\U0001f3c6 Comparison","\U0001f50d Analysis"])
+
 with tab1:
     st.markdown("## Data Overview")
     tc=st.session_state.target_name;fs=st.session_state.feature_names
@@ -185,65 +188,57 @@ with tab1:
     st.markdown("### Target Distribution")
     tvc=df[tc].value_counts().reset_index();tvc.columns=["Class","Count"]
     co=st.columns(2)
-    with co[0]: st.plotly_chart(px.bar(tvc,x="Class",y="Count",color="Class",title="Class Distribution").update_layout(height=400),use_container_width=True)
-    with co[1]: st.plotly_chart(px.pie(tvc,names="Class",values="Count",title="Class Proportions").update_layout(height=400),use_container_width=True)
+    with co[0]: st.plotly_chart(px.bar(tvc,x="Class",y="Count",color="Class",title="Distribution").update_layout(height=400),use_container_width=True)
+    with co[1]: st.plotly_chart(px.pie(tvc,names="Class",values="Count",title="Proportions").update_layout(height=400),use_container_width=True)
     if len(nf)>=2:
         st.markdown("### Correlation Heatmap")
         st.plotly_chart(px.imshow(df[nf].corr(),text_auto=".2f",color_continuous_scale="RdBu_r",zmin=-1,zmax=1,aspect="auto").update_layout(height=500),use_container_width=True)
     if nf:
         st.markdown("### Feature Distributions")
-        sel_f=st.multiselect("Plot features:",nf,default=nf[:min(6,len(nf))])
+        sel_f=st.multiselect("Features to plot:",nf,default=nf[:min(6,len(nf))])
         if sel_f:
-            nc=min(3,len(sel_f))
-            for ri in range((len(sel_f)+nc-1)//nc):
-                cols=st.columns(nc)
-                for ci in range(nc):
-                    idx=ri*nc+ci
+            nc2=min(3,len(sel_f))
+            for ri in range((len(sel_f)+nc2-1)//nc2):
+                cols=st.columns(nc2)
+                for ci in range(nc2):
+                    idx=ri*nc2+ci
                     if idx<len(sel_f):
                         with cols[ci]: st.plotly_chart(px.histogram(df,x=sel_f[idx],color=tc,marginal="box",barmode="overlay",opacity=0.7,title=sel_f[idx]).update_layout(height=350),use_container_width=True)
+
 with tab2:
     st.markdown("## Preprocessing Pipeline")
     tc=st.session_state.target_name;fs=st.session_state.feature_names
     nf=[c for c in fs if df[c].dtype in ["int64","float64","int32","float32"]];cf=[c for c in fs if c not in nf]
-    st.markdown("### 1\u20e3 Duplicates");dup_act=st.radio("Duplicates:",["Keep all","Remove"],horizontal=True)
-    st.markdown("### 2\u20e3 Missing Values")
-    miss_num=st.selectbox("Numeric:",["None","Mean","Median","Most frequent","Constant(0)","KNN Imputer"])
-    miss_cat=st.selectbox("Categorical:",["None","Most frequent","Constant(unknown)"])
-    st.markdown("### 3\u20e3 Encoding")
-    enc_m=st.selectbox("Encoding:",["None","Label Encoding","One-Hot","Ordinal"],index=0 if not cf else 1)
-    st.markdown("### 4\u20e3 Outlier Handling")
-    out_m=st.selectbox("Outliers:",["None","IQR clip","Z-score clip (3\u03c3)"])
-    st.markdown("### 5\u20e3 Scaling")
-    scl_m=st.selectbox("Scaling:",["None","StandardScaler","MinMaxScaler","RobustScaler","MaxAbsScaler","PowerTransformer","QuantileTransformer"])
-    st.markdown("### 6\u20e3 Feature Selection")
-    fs_m=st.selectbox("Selection:",["None","Variance Threshold","SelectKBest (ANOVA)","SelectKBest (MI)","SelectKBest (Chi2)","RFE (RF)","SelectFromModel (RF)"])
+    dup_act=st.radio("1. Duplicates:",["Keep","Remove"],horizontal=True)
+    miss_num=st.selectbox("2. Numeric missing:",["None","Mean","Median","Most frequent","Constant(0)","KNN Imputer"])
+    miss_cat=st.selectbox("3. Categorical missing:",["None","Most frequent","Constant(unknown)"])
+    enc_m=st.selectbox("4. Encoding:",["None","Label Encoding","One-Hot","Ordinal"],index=0 if not cf else 1)
+    out_m=st.selectbox("5. Outliers:",["None","IQR clip","Z-score clip"])
+    scl_m=st.selectbox("6. Scaling:",["None","StandardScaler","MinMaxScaler","RobustScaler","MaxAbsScaler","PowerTransformer","QuantileTransformer"])
+    fs_m=st.selectbox("7. Feature Selection:",["None","Variance Threshold","SelectKBest (ANOVA)","SelectKBest (MI)","SelectKBest (Chi2)","RFE (RF)","SelectFromModel (RF)"])
     fs_k=st.slider("N features:",1,max(1,len(fs)),len(fs),key="fsk") if fs_m!="None" else len(fs)
-    st.markdown("### 7\u20e3 Dimensionality Reduction")
-    dr_m=st.selectbox("Reduction:",["None","PCA","Truncated SVD","LDA"])
+    dr_m=st.selectbox("8. Dim Reduction:",["None","PCA","Truncated SVD","LDA"])
     dr_n=st.slider("N components:",1,max(1,len(fs)),min(2,len(fs)),key="drn") if dr_m!="None" else 0
-    st.markdown("### 8\u20e3 Class Imbalance (SMOTE)")
-    if HAS_IMBLEARN:
-        imb_m=st.selectbox("Resampling:",["None","SMOTE","ADASYN","BorderlineSMOTE","RandomOverSampler","RandomUnderSampler","TomekLinks","SMOTETomek","SMOTEENN"])
-    else: imb_m="None";st.info("Install imbalanced-learn: pip install imbalanced-learn")
-
+    st.markdown("### 9. Class Imbalance")
+    if HAS_IMBLEARN: imb_m=st.selectbox("Resampling:",["None","SMOTE","ADASYN","BorderlineSMOTE","RandomOverSampler","RandomUnderSampler","TomekLinks","SMOTETomek","SMOTEENN"])
+    else: imb_m="None";st.info("pip install imbalanced-learn for SMOTE")
     if st.button("\U0001f680 Apply Preprocessing",type="primary",use_container_width=True):
         with st.spinner("Processing..."):
             try:
                 pdf=df.copy();log=[]
-                if dup_act=="Remove": b=len(pdf);pdf=pdf.drop_duplicates();log.append(f"Removed {b-len(pdf)} duplicates")
+                if dup_act=="Remove": b=len(pdf);pdf=pdf.drop_duplicates();log.append(f"Removed {b-len(pdf)} dupes")
                 y_raw=pdf[tc].copy()
-                if y_raw.dtype==object or str(y_raw.dtype)=="category":
-                    le=LabelEncoder();y_enc=le.fit_transform(y_raw);st.session_state.class_names=[str(c) for c in le.classes_]
+                if y_raw.dtype==object or str(y_raw.dtype)=="category": le=LabelEncoder();y_enc=le.fit_transform(y_raw);st.session_state.class_names=[str(c) for c in le.classes_]
                 else: y_enc=y_raw.values;st.session_state.class_names=[str(c) for c in sorted(y_raw.unique())]
                 X_df=pdf[fs].copy()
                 if miss_num!="None" and nf:
                     nf_in=[c for c in nf if c in X_df.columns]
                     imp={"Mean":SimpleImputer(strategy="mean"),"Median":SimpleImputer(strategy="median"),"Most frequent":SimpleImputer(strategy="most_frequent"),"Constant(0)":SimpleImputer(strategy="constant",fill_value=0),"KNN Imputer":KNNImputer(n_neighbors=5)}[miss_num]
-                    X_df[nf_in]=imp.fit_transform(X_df[nf_in]);log.append(f"Imputed numeric: {miss_num}")
+                    X_df[nf_in]=imp.fit_transform(X_df[nf_in]);log.append(f"Imputed: {miss_num}")
                 if miss_cat!="None" and cf:
                     cf_in=[c for c in cf if c in X_df.columns]
                     imp_c=SimpleImputer(strategy="most_frequent") if "frequent" in miss_cat else SimpleImputer(strategy="constant",fill_value="unknown")
-                    X_df[cf_in]=imp_c.fit_transform(X_df[cf_in]);log.append(f"Imputed cat: {miss_cat}")
+                    X_df[cf_in]=imp_c.fit_transform(X_df[cf_in]);log.append(f"Cat imputed: {miss_cat}")
                 if enc_m!="None" and cf:
                     cf_in=[c for c in cf if c in X_df.columns]
                     if enc_m=="Label Encoding":
@@ -254,53 +249,52 @@ with tab2:
                 nf_now=[c for c in X_df.columns if X_df[c].dtype in ["int64","float64","int32","float32"]]
                 if out_m=="IQR clip" and nf_now:
                     for c in nf_now: q1,q3=X_df[c].quantile(0.25),X_df[c].quantile(0.75);iqr=q3-q1;X_df[c]=X_df[c].clip(q1-1.5*iqr,q3+1.5*iqr)
-                    log.append("Outlier: IQR clip")
-                elif "Z-score" in out_m and nf_now:
-                    for c in nf_now: mu,sig=X_df[c].mean(),X_df[c].std();X_df[c]=X_df[c].clip(mu-3*sig,mu+3*sig)
-                    log.append("Outlier: Z-score clip")
+                    log.append("IQR clip")
+                elif out_m=="Z-score clip" and nf_now:
+                    for c in nf_now: mu,sig=X_df[c].mean(),X_df[c].std()+1e-15;X_df[c]=X_df[c].clip(mu-3*sig,mu+3*sig)
+                    log.append("Z-score clip")
                 X_arr=X_df.values.astype(float);fn_now=list(X_df.columns)
                 if scl_m!="None":
                     sc={"StandardScaler":StandardScaler(),"MinMaxScaler":MinMaxScaler(),"RobustScaler":RobustScaler(),"MaxAbsScaler":MaxAbsScaler(),"PowerTransformer":PowerTransformer(),"QuantileTransformer":QuantileTransformer(output_distribution="normal")}[scl_m]
                     X_arr=sc.fit_transform(X_arr);log.append(f"Scaled: {scl_m}")
                 if fs_m!="None":
-                    k_use=min(fs_k,X_arr.shape[1])
+                    ku=min(fs_k,X_arr.shape[1])
                     if fs_m=="Variance Threshold": sel=VarianceThreshold(threshold=0.01)
-                    elif "ANOVA" in fs_m: sel=SelectKBest(f_classif,k=k_use)
-                    elif "MI" in fs_m: sel=SelectKBest(mutual_info_classif,k=k_use)
-                    elif "Chi2" in fs_m: X_arr=X_arr-X_arr.min(axis=0);sel=SelectKBest(chi2,k=k_use)
-                    elif "RFE" in fs_m: sel=RFE(RandomForestClassifier(n_estimators=50,random_state=42),n_features_to_select=k_use)
-                    else: sel=SelectFromModel(RandomForestClassifier(n_estimators=50,random_state=42),max_features=k_use)
+                    elif "ANOVA" in fs_m: sel=SelectKBest(f_classif,k=ku)
+                    elif "MI" in fs_m: sel=SelectKBest(mutual_info_classif,k=ku)
+                    elif "Chi2" in fs_m: X_arr=X_arr-X_arr.min(axis=0);sel=SelectKBest(chi2,k=ku)
+                    elif "RFE" in fs_m: sel=RFE(RandomForestClassifier(n_estimators=50,random_state=42),n_features_to_select=ku)
+                    else: sel=SelectFromModel(RandomForestClassifier(n_estimators=50,random_state=42),max_features=ku)
                     X_arr=sel.fit_transform(X_arr,y_enc);mask=sel.get_support();fn_now=[fn_now[i] for i in range(len(mask)) if mask[i]]
-                    log.append(f"Feature sel: {fs_m} -> {X_arr.shape[1]}")
+                    log.append(f"Selected: {fs_m} -> {X_arr.shape[1]}")
                 if dr_m!="None":
-                    nc=min(dr_n,X_arr.shape[1],X_arr.shape[0]-1)
-                    if dr_m=="PCA": red=PCA(n_components=nc)
-                    elif dr_m=="Truncated SVD": red=TruncatedSVD(n_components=nc)
-                    else: nc=min(nc,len(np.unique(y_enc))-1);red=LDA_decomp(n_components=max(nc,1))
+                    nc3=min(dr_n,X_arr.shape[1],X_arr.shape[0]-1)
+                    if dr_m=="PCA": red=PCA(n_components=nc3)
+                    elif dr_m=="Truncated SVD": red=TruncatedSVD(n_components=nc3)
+                    else: nc3=min(nc3,len(np.unique(y_enc))-1);red=LDA_decomp(n_components=max(nc3,1))
                     X_arr=red.fit_transform(X_arr,y_enc);fn_now=[f"Comp_{i+1}" for i in range(X_arr.shape[1])]
-                    log.append(f"Dim red: {dr_m} -> {X_arr.shape[1]}")
+                    log.append(f"DimRed: {dr_m} -> {X_arr.shape[1]}")
                 strat=y_enc if stratify_split else None
                 X_train,X_test,y_train,y_test=train_test_split(X_arr,y_enc,test_size=test_size,random_state=random_state,stratify=strat)
                 if imb_m!="None" and HAS_IMBLEARN:
                     samplers={"SMOTE":SMOTE(random_state=42),"ADASYN":ADASYN(random_state=42),"BorderlineSMOTE":BorderlineSMOTE(random_state=42),"RandomOverSampler":RandomOverSampler(random_state=42),"RandomUnderSampler":RandomUnderSampler(random_state=42),"TomekLinks":TomekLinks(),"SMOTETomek":SMOTETomek(random_state=42),"SMOTEENN":SMOTEENN(random_state=42)}
-                    b4=len(y_train);X_train,y_train=samplers[imb_m].fit_resample(X_train,y_train)
-                    log.append(f"Resampled: {imb_m} ({b4} -> {len(y_train)})")
+                    b4=len(y_train);X_train,y_train=samplers[imb_m].fit_resample(X_train,y_train);log.append(f"Resampled: {imb_m} ({b4}->{len(y_train)})")
                 st.session_state.X=X_arr;st.session_state.y=y_enc
                 st.session_state.X_train=X_train;st.session_state.X_test=X_test
                 st.session_state.y_train=y_train;st.session_state.y_test=y_test
                 st.session_state.feature_names=fn_now;st.session_state.preprocessing_done=True
-                st.success("\u2705 Preprocessing Complete!")
+                st.success("\u2705 Done!")
                 for s in log: st.markdown(f"- {s}")
                 c1,c2,c3,c4=st.columns(4)
                 with c1: st.metric("Train",len(X_train))
                 with c2: st.metric("Test",len(X_test))
-                with c3: st.metric("Features",X_arr.shape[1])
+                with c3: st.metric("Features",X_train.shape[1])
                 with c4: st.metric("Classes",len(np.unique(y_enc)))
             except Exception as e: st.error(str(e));import traceback;st.code(traceback.format_exc())
+
 with tab3:
     st.markdown("## Model Training")
-    if not st.session_state.preprocessing_done: st.warning("Apply Preprocessing first (Tab 2).");st.stop()
-    st.markdown("### Select Models")
+    if not st.session_state.preprocessing_done: st.warning("Apply Preprocessing first.");st.stop()
     all_mn=list(MODEL_REGISTRY.keys())
     qs=st.radio("Quick:",["Custom","All","Tree-based","Linear","Boosting"],horizontal=True)
     if qs=="All": dm=all_mn
@@ -309,14 +303,13 @@ with tab3:
     elif qs=="Boosting": dm=[m for m in all_mn if any(k in m for k in ["Boost","XGB","LGBM","Cat","Ada"])]
     else: dm=["Logistic Regression","Random Forest","SVM (RBF)","KNN","Gradient Boosting"]
     selected=st.multiselect("Models:",all_mn,default=[m for m in dm if m in all_mn])
-    st.session_state.selected_models=selected
     if selected:
-        st.markdown("### Hyperparameter Tuning")
-        use_tuning=st.checkbox("Enable HP Tuning (GridSearch / RandomSearch)",value=False)
+        st.markdown("### HP Tuning")
+        use_tuning=st.checkbox("Enable HP Tuning",value=False)
         tune_method="none";tune_cv=5;tune_scoring="accuracy";tune_niter=20
         if use_tuning:
             tune_method=st.selectbox("Method:",["RandomizedSearchCV","GridSearchCV"])
-            tune_cv=st.slider("Tuning CV folds:",2,10,5)
+            tune_cv=st.slider("Tuning CV:",2,10,5)
             tune_scoring=st.selectbox("Scoring:",["accuracy","f1_weighted","precision_weighted","recall_weighted"])
             if tune_method=="RandomizedSearchCV": tune_niter=st.slider("N iter:",5,200,20)
         for mname in selected:
@@ -326,9 +319,8 @@ with tab3:
                 hp_vals={}
                 for i,hp in enumerate(hp_names): hp_vals[hp]=render_hp_widget(hp,hp_grid[hp],mname,cols[i%ncols])
                 st.session_state.hp_configs[mname]=hp_vals
-        eval_cv=st.slider("Evaluation CV folds:",2,20,5,key="ecv")
-
-        if st.button("\U0001f680 Train All Models",type="primary",use_container_width=True):
+        eval_cv=st.slider("Eval CV:",2,20,5,key="ecv")
+        if st.button("\U0001f680 Train All",type="primary",use_container_width=True):
             X_tr=st.session_state.X_train;X_te=st.session_state.X_test
             y_tr=st.session_state.y_train;y_te=st.session_state.y_test
             n_cls=len(np.unique(y_tr));avg="binary" if n_cls==2 else "weighted"
@@ -337,33 +329,33 @@ with tab3:
                 status.text(f"Training {mname} ({mi+1}/{len(selected)})...")
                 try:
                     mreg=MODEL_REGISTRY[mname];hp=st.session_state.hp_configs.get(mname,{}).copy()
-                    if mname=="MLP Neural Net" and "hidden_layer_sizes" in hp and isinstance(hp["hidden_layer_sizes"],str): hp["hidden_layer_sizes"]=parse_hidden_layers(hp["hidden_layer_sizes"])
+                    if "hidden_layer_sizes" in hp and isinstance(hp["hidden_layer_sizes"],str): hp["hidden_layer_sizes"]=parse_hidden_layers(hp["hidden_layer_sizes"])
                     valid_p=set(inspect.signature(mreg["class"].__init__).parameters.keys())-{"self"}
                     hp_clean={k:v for k,v in hp.items() if k in valid_p}
                     for dk,dv in mreg["default"].items():
                         if dk not in hp_clean and dk in valid_p: hp_clean[dk]=dv
                     t0=time.time()
                     if use_tuning and tune_method!="none":
-                        from sklearn.model_selection import ParameterGrid
+                        import math as _m
                         pg={}
                         for hk,hcfg in mreg["hp"].items():
-                            if hcfg["type"]=="select": pg[hk]=hcfg["options"]
-                            elif hcfg["type"]=="int": pg[hk]=[hcfg["min"],(hcfg["min"]+hcfg["max"])//2,hcfg["max"]]
+                            if hk not in valid_p: continue
+                            if hcfg["type"]=="select":
+                                if hk=="hidden_layer_sizes": pg[hk]=[parse_hidden_layers(o) for o in hcfg["options"]]
+                                else: pg[hk]=hcfg["options"]
+                            elif hcfg["type"]=="int": pg[hk]=sorted(set([hcfg["min"],(hcfg["min"]+hcfg["max"])//2,hcfg["max"]]))
                             elif hcfg["type"]=="int_none": pg[hk]=[None,hcfg["min"],(hcfg["min"]+hcfg["max"])//2]
                             elif hcfg["type"] in ["float","float_log"]:
-                                import math;lo=hcfg["min"];hi=hcfg["max"];mid=math.sqrt(lo*hi) if lo>0 and hi>0 else (lo+hi)/2
-                                pg[hk]=[lo,mid,hi]
-                        pg_filt={k:v for k,v in pg.items() if k in valid_p}
-                        base=mreg["class"](**{dk:dv for dk,dv in mreg["default"].items() if dk in valid_p})
-                        if tune_method=="RandomizedSearchCV":
-                            search=RandomizedSearchCV(base,pg_filt,n_iter=min(tune_niter,30),cv=tune_cv,scoring=tune_scoring,random_state=42,n_jobs=-1,error_score=0)
-                        else:
-                            search=GridSearchCV(base,pg_filt,cv=tune_cv,scoring=tune_scoring,n_jobs=-1,error_score=0)
+                                lo=hcfg["min"];hi=hcfg["max"];mid=_m.sqrt(lo*hi) if lo>0 and hi>0 else (lo+hi)/2
+                                pg[hk]=sorted(set([lo,mid,hi]))
+                        base_p={dk:dv for dk,dv in mreg["default"].items() if dk in valid_p}
+                        base=mreg["class"](**base_p)
+                        if tune_method=="RandomizedSearchCV": search=RandomizedSearchCV(base,pg,n_iter=min(tune_niter,30),cv=tune_cv,scoring=tune_scoring,random_state=42,n_jobs=-1,error_score=0)
+                        else: search=GridSearchCV(base,pg,cv=tune_cv,scoring=tune_scoring,n_jobs=-1,error_score=0)
                         search.fit(X_tr,y_tr);model=search.best_estimator_;hp_clean=search.best_params_
                     else:
                         model=mreg["class"](**hp_clean);model.fit(X_tr,y_tr)
-                    train_time=time.time()-t0
-                    y_pred=model.predict(X_te)
+                    train_time=time.time()-t0;y_pred=model.predict(X_te)
                     y_prob=None
                     if hasattr(model,"predict_proba"):
                         try: y_prob=model.predict_proba(X_te)
@@ -382,16 +374,16 @@ with tab3:
             comp=pd.DataFrame([v for v in results.values() if v.get("accuracy",0)>0])
             if len(comp)>0: comp=comp.sort_values("accuracy",ascending=False)
             st.session_state.comparison_df=comp;prog.empty();status.empty()
-            st.success(f"\u2705 {len(results)} models trained!")
+            st.success(f"\u2705 {len(comp)} models trained!")
             if len(comp)>0:
-                b=comp.iloc[0]
-                st.markdown(f'<div class="success-box"><b>\U0001f3c6 Best: {b["model_name"]}</b> Acc={b["accuracy"]:.4f} F1={b.get("f1",0):.4f}</div>',unsafe_allow_html=True)
+                b=comp.iloc[0];st.markdown(f'<div class="success-box"><b>\U0001f3c6 Best: {b["model_name"]}</b> Acc={b["accuracy"]:.4f} F1={b.get("f1",0):.4f}</div>',unsafe_allow_html=True)
+
 with tab4:
     st.markdown("## Detailed Results")
     if not st.session_state.model_results: st.warning("Train models first.");st.stop()
     res=st.session_state.model_results;preds=st.session_state.all_predictions
     mnames=[k for k in res if res[k].get("accuracy",0)>0]
-    if not mnames: st.error("No models.");st.stop()
+    if not mnames: st.error("No successful models.");st.stop()
     sel=st.selectbox("Model:",mnames);mr=res[sel];mp=preds.get(sel,{})
     y_te=st.session_state.y_test;cn=st.session_state.class_names
     c1,c2,c3,c4,c5=st.columns(5)
@@ -409,8 +401,8 @@ with tab4:
         co=st.columns(2)
         with co[0]: st.plotly_chart(px.imshow(cm,text_auto=True,color_continuous_scale="Blues",x=clbl,y=clbl).update_layout(title="Raw",xaxis_title="Predicted",yaxis_title="Actual",height=450),use_container_width=True)
         with co[1]:
-            cmn=cm.astype(float)/cm.sum(axis=1,keepdims=True)
-            st.plotly_chart(px.imshow(cmn,text_auto=".2%",color_continuous_scale="Purples",x=clbl,y=clbl).update_layout(title="Normalized",xaxis_title="Predicted",yaxis_title="Actual",height=450),use_container_width=True)
+            cmn=cm.astype(float)/(cm.sum(axis=1,keepdims=True)+1e-15)
+            st.plotly_chart(px.imshow(cmn,text_auto=".2%",color_continuous_scale="Purples",x=clbl,y=clbl).update_layout(title="Normalized",height=450),use_container_width=True)
         st.markdown("### Classification Report")
         cr=classification_report(y_te,mp["y_pred"],target_names=clbl,output_dict=True);st.dataframe(pd.DataFrame(cr).T.round(4),use_container_width=True)
         if mp.get("y_prob") is not None:
@@ -421,19 +413,18 @@ with tab4:
                 fig_r=go.Figure()
                 if nc==2: fpr,tpr,_=roc_curve(y_te,yp[:,1]);fig_r.add_trace(go.Scatter(x=fpr,y=tpr,name=f"AUC={auc(fpr,tpr):.4f}"))
                 else:
-                    yb=label_binarize(y_te,classes=list(range(nc)));cols=px.colors.qualitative.Set2
-                    for i in range(nc): fpr,tpr,_=roc_curve(yb[:,i],yp[:,i]);fig_r.add_trace(go.Scatter(x=fpr,y=tpr,name=f"{clbl[i]} {auc(fpr,tpr):.3f}",line=dict(color=cols[i%len(cols)])))
+                    yb=label_binarize(y_te,classes=list(range(nc)));clrs=px.colors.qualitative.Set2
+                    for i in range(nc): fpr,tpr,_=roc_curve(yb[:,i],yp[:,i]);fig_r.add_trace(go.Scatter(x=fpr,y=tpr,name=f"{clbl[i]} {auc(fpr,tpr):.3f}",line=dict(color=clrs[i%len(clrs)])))
                 fig_r.add_trace(go.Scatter(x=[0,1],y=[0,1],line=dict(dash="dash",color="gray"),showlegend=False))
                 fig_r.update_layout(title="ROC",height=450);st.plotly_chart(fig_r,use_container_width=True)
             with co[1]:
                 fig_p=go.Figure()
                 if nc==2: pr,rc,_=precision_recall_curve(y_te,yp[:,1]);fig_p.add_trace(go.Scatter(x=rc,y=pr,name=f"AP={average_precision_score(y_te,yp[:,1]):.4f}"))
                 else:
-                    yb=label_binarize(y_te,classes=list(range(nc)));cols=px.colors.qualitative.Set2
-                    for i in range(nc): pr,rc,_=precision_recall_curve(yb[:,i],yp[:,i]);fig_p.add_trace(go.Scatter(x=rc,y=pr,name=f"{clbl[i]} {average_precision_score(yb[:,i],yp[:,i]):.3f}",line=dict(color=cols[i%len(cols)])))
+                    yb=label_binarize(y_te,classes=list(range(nc)));clrs=px.colors.qualitative.Set2
+                    for i in range(nc): pr,rc,_=precision_recall_curve(yb[:,i],yp[:,i]);fig_p.add_trace(go.Scatter(x=rc,y=pr,name=f"{clbl[i]} {average_precision_score(yb[:,i],yp[:,i]):.3f}",line=dict(color=clrs[i%len(clrs)])))
                 fig_p.update_layout(title="Precision-Recall",height=450);st.plotly_chart(fig_p,use_container_width=True)
-        mdl=mp.get("model")
-        fn=st.session_state.feature_names
+        mdl=mp.get("model");fn=st.session_state.feature_names
         if mdl and hasattr(mdl,"feature_importances_") and len(mdl.feature_importances_)==len(fn):
             st.markdown("### Feature Importance")
             fi_df=pd.DataFrame({"Feature":fn,"Importance":mdl.feature_importances_}).sort_values("Importance",ascending=True).tail(20)
@@ -451,6 +442,7 @@ with tab4:
                     pi=permutation_importance(mdl,st.session_state.X_test,y_te,n_repeats=10,random_state=42,scoring="accuracy")
                     pi_df=pd.DataFrame({"Feature":fn,"Mean":pi.importances_mean,"Std":pi.importances_std}).sort_values("Mean",ascending=True).tail(20)
                     st.plotly_chart(px.bar(pi_df,y="Feature",x="Mean",error_x="Std",orientation="h",title="Permutation Importance",color="Mean",color_continuous_scale="Cividis").update_layout(height=500),use_container_width=True)
+
 with tab5:
     st.markdown("## \U0001f3c6 Model Comparison")
     if st.session_state.comparison_df is None or len(st.session_state.comparison_df)==0: st.warning("Train models first.");st.stop()
@@ -460,8 +452,7 @@ with tab5:
     st.dataframe(comp[[c for c in show_c if c in comp.columns]].round(4),use_container_width=True)
     b=comp.iloc[0];st.markdown(f'<div class="success-box"><b>\U0001f3c6 {b["model_name"]}</b> Acc={b["accuracy"]:.4f} F1={b.get("f1",0):.4f} MCC={b.get("mcc",0):.4f}</div>',unsafe_allow_html=True)
     st.markdown("### Metric Bars")
-    m_opts=["accuracy","balanced_accuracy","precision","recall","f1","mcc","kappa","roc_auc","cv_mean","train_time"]
-    m_opts=[m for m in m_opts if m in comp.columns]
+    m_opts=[m for m in ["accuracy","balanced_accuracy","precision","recall","f1","mcc","kappa","roc_auc","cv_mean","train_time"] if m in comp.columns]
     sel_m=st.multiselect("Metrics:",m_opts,default=m_opts[:6],key="cmp_m")
     for met in sel_m:
         sdf=comp[["model_name",met]].dropna().sort_values(met,ascending=False)
@@ -469,145 +460,128 @@ with tab5:
         fig=go.Figure(go.Bar(x=sdf["model_name"],y=sdf[met],marker_color=colors,text=sdf[met].round(4),textposition="outside"))
         fig.update_layout(title=met.replace("_"," ").title(),height=400);st.plotly_chart(fig,use_container_width=True)
     st.markdown("### Radar")
-    rm=["accuracy","precision","recall","f1","mcc","balanced_accuracy"];rm=[m for m in rm if m in comp.columns]
+    rm=[m for m in ["accuracy","precision","recall","f1","mcc","balanced_accuracy"] if m in comp.columns]
     if len(rm)>=3 and len(comp)>=2:
         topn=st.slider("Top N:",2,min(10,len(comp)),min(5,len(comp)))
-        fig_rd=go.Figure();cols=px.colors.qualitative.Set2
+        fig_rd=go.Figure();clrs=px.colors.qualitative.Set2
         for i in range(topn):
             r=comp.iloc[i];vals=[r.get(m,0) for m in rm]+[r.get(rm[0],0)]
-            fig_rd.add_trace(go.Scatterpolar(r=vals,theta=rm+[rm[0]],fill="toself",name=r["model_name"],line=dict(color=cols[i%len(cols)])))
+            fig_rd.add_trace(go.Scatterpolar(r=vals,theta=rm+[rm[0]],fill="toself",name=r["model_name"],line=dict(color=clrs[i%len(clrs)])))
         fig_rd.update_layout(polar=dict(radialaxis=dict(visible=True,range=[0,1])),height=550);st.plotly_chart(fig_rd,use_container_width=True)
     if "train_time" in comp.columns:
         st.markdown("### Accuracy vs Speed")
-        st.plotly_chart(px.scatter(comp,x="train_time",y="accuracy",text="model_name",color="model_name",size="f1" if "f1" in comp.columns else None,title="Accuracy vs Training Time").update_traces(textposition="top center").update_layout(height=500),use_container_width=True)
+        st.plotly_chart(px.scatter(comp,x="train_time",y="accuracy",text="model_name",color="model_name",title="Accuracy vs Time").update_traces(textposition="top center").update_layout(height=500),use_container_width=True)
     st.markdown("### Confusion Matrices")
     top4=comp["model_name"].head(min(4,len(comp))).tolist();cols_cm=st.columns(min(2,len(top4)))
     for i,mn in enumerate(top4):
-        mp=preds.get(mn,{})
-        if "y_pred" in mp:
-            cm=confusion_matrix(y_te,mp["y_pred"]);clbl=cn if len(cn)==cm.shape[0] else [str(j) for j in range(cm.shape[0])]
-            with cols_cm[i%len(cols_cm)]: st.plotly_chart(px.imshow(cm,text_auto=True,color_continuous_scale="Blues",x=clbl,y=clbl).update_layout(title=mn,height=380),use_container_width=True)
+        mp2=preds.get(mn,{})
+        if "y_pred" in mp2:
+            cm2=confusion_matrix(y_te,mp2["y_pred"]);clbl2=cn if len(cn)==cm2.shape[0] else [str(j) for j in range(cm2.shape[0])]
+            with cols_cm[i%len(cols_cm)]: st.plotly_chart(px.imshow(cm2,text_auto=True,color_continuous_scale="Blues",x=clbl2,y=clbl2).update_layout(title=mn,height=380),use_container_width=True)
     st.markdown("### ROC Overlay")
-    nc=len(cn) if cn else len(np.unique(y_te));fig_ra=go.Figure();cols_r=px.colors.qualitative.Set2+px.colors.qualitative.Pastel
+    nc4=len(cn) if cn else len(np.unique(y_te));fig_ra=go.Figure();clrs4=px.colors.qualitative.Set2+px.colors.qualitative.Pastel
     for i,mn in enumerate(comp["model_name"].tolist()):
-        mp=preds.get(mn,{});yp=mp.get("y_prob")
-        if yp is not None:
+        mp2=preds.get(mn,{});yp2=mp2.get("y_prob")
+        if yp2 is not None:
             try:
-                if nc==2: fpr,tpr,_=roc_curve(y_te,yp[:,1]);fig_ra.add_trace(go.Scatter(x=fpr,y=tpr,name=f"{mn} ({auc(fpr,tpr):.3f})",line=dict(color=cols_r[i%len(cols_r)])))
-                else: yb=label_binarize(y_te,classes=list(range(nc)));fpr,tpr,_=roc_curve(yb.ravel(),yp.ravel());fig_ra.add_trace(go.Scatter(x=fpr,y=tpr,name=f"{mn} ({auc(fpr,tpr):.3f})",line=dict(color=cols_r[i%len(cols_r)])))
+                if nc4==2: fpr,tpr,_=roc_curve(y_te,yp2[:,1]);fig_ra.add_trace(go.Scatter(x=fpr,y=tpr,name=f"{mn} ({auc(fpr,tpr):.3f})",line=dict(color=clrs4[i%len(clrs4)])))
+                else: yb2=label_binarize(y_te,classes=list(range(nc4)));fpr,tpr,_=roc_curve(yb2.ravel(),yp2.ravel());fig_ra.add_trace(go.Scatter(x=fpr,y=tpr,name=f"{mn} ({auc(fpr,tpr):.3f})",line=dict(color=clrs4[i%len(clrs4)])))
             except: pass
     fig_ra.add_trace(go.Scatter(x=[0,1],y=[0,1],line=dict(dash="dash",color="gray"),showlegend=False))
     fig_ra.update_layout(title="ROC All Models",height=500);st.plotly_chart(fig_ra,use_container_width=True)
     st.markdown("### Metrics Heatmap")
-    hc=["accuracy","balanced_accuracy","precision","recall","f1","mcc","kappa","roc_auc","cv_mean"]
-    hc=[c for c in hc if c in comp.columns]
+    hc=[c for c in ["accuracy","balanced_accuracy","precision","recall","f1","mcc","kappa","roc_auc","cv_mean"] if c in comp.columns]
     if hc:
         hdf=comp.set_index("model_name")[hc].dropna(axis=1,how="all")
         st.plotly_chart(px.imshow(hdf,text_auto=".3f",color_continuous_scale="RdYlGn",aspect="auto").update_layout(height=max(300,len(comp)*40)),use_container_width=True)
     st.markdown("### Export")
     buf=io.StringIO();comp.to_csv(buf,index=False)
     st.download_button("Download CSV",buf.getvalue(),"ml_comparison.csv","text/csv",use_container_width=True)
+
 with tab6:
     st.markdown("## \U0001f50d Deep Analysis")
     if not st.session_state.trained_models: st.warning("Train models first.");st.stop()
     trained=st.session_state.trained_models;preds=st.session_state.all_predictions
     X_tr=st.session_state.X_train;X_te=st.session_state.X_test;y_tr=st.session_state.y_train;y_te=st.session_state.y_test
-    cn=st.session_state.class_names;fn=st.session_state.feature_names
-    mnames=list(trained.keys())
-
+    cn=st.session_state.class_names;fn=st.session_state.feature_names;mnames=list(trained.keys())
     st.markdown("### Learning Curves")
-    lc_model=st.selectbox("Model for learning curve:",mnames,key="lc_m")
+    lc_model=st.selectbox("Model:",mnames,key="lc_m")
     if st.button("Plot Learning Curve",key="lc_btn"):
-        with st.spinner("Computing learning curve..."):
-            mdl=trained[lc_model]
-            try:
-                tsizes,tr_sc,te_sc=learning_curve(mdl,X_tr,y_tr,cv=5,n_jobs=-1,train_sizes=np.linspace(0.1,1.0,10),scoring="accuracy",random_state=42)
-                fig_lc=go.Figure()
-                fig_lc.add_trace(go.Scatter(x=tsizes,y=tr_sc.mean(axis=1),mode="lines+markers",name="Train",line=dict(color="#2E86C1"),error_y=dict(type="data",array=tr_sc.std(axis=1),visible=True)))
-                fig_lc.add_trace(go.Scatter(x=tsizes,y=te_sc.mean(axis=1),mode="lines+markers",name="Validation",line=dict(color="#E74C3C"),error_y=dict(type="data",array=te_sc.std(axis=1),visible=True)))
-                fig_lc.update_layout(title=f"Learning Curve: {lc_model}",xaxis_title="Training Samples",yaxis_title="Accuracy",height=450);st.plotly_chart(fig_lc,use_container_width=True)
-            except Exception as e: st.warning(f"Error: {e}")
-
-    st.markdown("### Calibration Curves")
-    nc=len(np.unique(y_te))
-    if nc==2 and st.button("Plot Calibration Curves",key="cal_btn"):
         with st.spinner("Computing..."):
-            fig_cal=go.Figure();cols_c=px.colors.qualitative.Set2
-            for i,mn in enumerate(mnames):
-                yp=preds.get(mn,{}).get("y_prob")
-                if yp is not None:
-                    try:
-                        frac_pos,mean_pred=calibration_curve(y_te,yp[:,1],n_bins=10)
-                        fig_cal.add_trace(go.Scatter(x=mean_pred,y=frac_pos,mode="lines+markers",name=mn,line=dict(color=cols_c[i%len(cols_c)])))
-                    except: pass
-            fig_cal.add_trace(go.Scatter(x=[0,1],y=[0,1],line=dict(dash="dash",color="gray"),name="Perfect"))
-            fig_cal.update_layout(title="Calibration Curves",xaxis_title="Mean Predicted Prob",yaxis_title="Fraction Positive",height=500);st.plotly_chart(fig_cal,use_container_width=True)
-    elif nc>2: st.info("Calibration curves shown for binary classification.")
-
-    st.markdown("### Cross-Validation Predictions")
-    cvp_model=st.selectbox("Model for CV predictions:",mnames,key="cvp_m")
-    if st.button("Compute CV Predictions",key="cvp_btn"):
-        with st.spinner("Cross-val predict..."):
             try:
-                mdl=trained[cvp_model];cvp=cross_val_predict(mdl,X_tr,y_tr,cv=5)
-                cm_cv=confusion_matrix(y_tr,cvp);clbl=cn if len(cn)==cm_cv.shape[0] else [str(i) for i in range(cm_cv.shape[0])]
-                co=st.columns(2)
-                with co[0]: st.plotly_chart(px.imshow(cm_cv,text_auto=True,color_continuous_scale="Blues",x=clbl,y=clbl).update_layout(title=f"CV CM: {cvp_model}",height=400),use_container_width=True)
-                with co[1]:
-                    cv_cr=classification_report(y_tr,cvp,target_names=clbl,output_dict=True);st.dataframe(pd.DataFrame(cv_cr).T.round(4),use_container_width=True)
-            except Exception as e: st.warning(f"Error: {e}")
-
+                tsizes,tr_sc,te_sc=learning_curve(trained[lc_model],X_tr,y_tr,cv=5,n_jobs=-1,train_sizes=np.linspace(0.1,1.0,10),scoring="accuracy",random_state=42)
+                fig_lc=go.Figure()
+                fig_lc.add_trace(go.Scatter(x=tsizes,y=tr_sc.mean(axis=1),mode="lines+markers",name="Train",line=dict(color="#2E86C1")))
+                fig_lc.add_trace(go.Scatter(x=tsizes,y=te_sc.mean(axis=1),mode="lines+markers",name="Validation",line=dict(color="#E74C3C")))
+                fig_lc.update_layout(title=f"Learning Curve: {lc_model}",xaxis_title="Training Samples",yaxis_title="Accuracy",height=450);st.plotly_chart(fig_lc,use_container_width=True)
+            except Exception as e: st.warning(str(e))
+    st.markdown("### Calibration Curves")
+    nc5=len(np.unique(y_te))
+    if nc5==2 and st.button("Plot Calibration",key="cal_btn"):
+        fig_cal=go.Figure();clrs5=px.colors.qualitative.Set2
+        for i,mn in enumerate(mnames):
+            yp3=preds.get(mn,{}).get("y_prob")
+            if yp3 is not None:
+                try: frac_pos,mean_pred=calibration_curve(y_te,yp3[:,1],n_bins=10);fig_cal.add_trace(go.Scatter(x=mean_pred,y=frac_pos,mode="lines+markers",name=mn,line=dict(color=clrs5[i%len(clrs5)])))
+                except: pass
+        fig_cal.add_trace(go.Scatter(x=[0,1],y=[0,1],line=dict(dash="dash",color="gray"),name="Perfect"))
+        fig_cal.update_layout(title="Calibration",xaxis_title="Mean Predicted Prob",yaxis_title="Fraction Positive",height=500);st.plotly_chart(fig_cal,use_container_width=True)
+    elif nc5>2: st.info("Calibration curves for binary classification only.")
+    st.markdown("### Cross-Val Predictions")
+    cvp_model=st.selectbox("Model:",mnames,key="cvp_m")
+    if st.button("CV Predict",key="cvp_btn"):
+        with st.spinner("Computing..."):
+            try:
+                cvp=cross_val_predict(trained[cvp_model],X_tr,y_tr,cv=5)
+                cm_cv=confusion_matrix(y_tr,cvp);clbl3=cn if len(cn)==cm_cv.shape[0] else [str(i) for i in range(cm_cv.shape[0])]
+                co2=st.columns(2)
+                with co2[0]: st.plotly_chart(px.imshow(cm_cv,text_auto=True,color_continuous_scale="Blues",x=clbl3,y=clbl3).update_layout(title=f"CV CM: {cvp_model}",height=400),use_container_width=True)
+                with co2[1]: st.dataframe(pd.DataFrame(classification_report(y_tr,cvp,target_names=clbl3,output_dict=True)).T.round(4),use_container_width=True)
+            except Exception as e: st.warning(str(e))
     st.markdown("### Error Analysis")
-    err_model=st.selectbox("Model for error analysis:",mnames,key="err_m")
-    mp=preds.get(err_model,{})
-    if "y_pred" in mp:
-        y_pred=mp["y_pred"];wrong=y_pred!=y_te;n_wrong=int(wrong.sum())
-        st.metric("Misclassified samples",f"{n_wrong} / {len(y_te)} ({n_wrong/len(y_te)*100:.1f}%)")
+    err_model=st.selectbox("Model:",mnames,key="err_m")
+    mp3=preds.get(err_model,{})
+    if "y_pred" in mp3:
+        y_pred3=mp3["y_pred"];wrong=y_pred3!=y_te;n_wrong=int(wrong.sum())
+        st.metric("Misclassified",f"{n_wrong}/{len(y_te)} ({n_wrong/len(y_te)*100:.1f}%)")
         if n_wrong>0:
             err_idx=np.where(wrong)[0]
-            err_df=pd.DataFrame(X_te[err_idx],columns=fn);err_df["True"]=y_te[err_idx];err_df["Predicted"]=y_pred[err_idx]
+            err_df=pd.DataFrame(X_te[err_idx],columns=fn);err_df["True"]=y_te[err_idx];err_df["Predicted"]=y_pred3[err_idx]
             st.dataframe(err_df.head(50).round(4),use_container_width=True)
-            err_cm=pd.crosstab(pd.Series(y_te[err_idx],name="True"),pd.Series(y_pred[err_idx],name="Predicted"))
-            st.plotly_chart(px.imshow(err_cm,text_auto=True,color_continuous_scale="Reds",title="Error Confusion Pattern").update_layout(height=400),use_container_width=True)
-
+            err_cm=pd.crosstab(pd.Series(y_te[err_idx],name="True"),pd.Series(y_pred3[err_idx],name="Predicted"))
+            st.plotly_chart(px.imshow(err_cm,text_auto=True,color_continuous_scale="Reds",title="Error Pattern").update_layout(height=400),use_container_width=True)
     st.markdown("### Ensemble Builder")
     if len(mnames)>=2:
-        ens_models=st.multiselect("Models for ensemble:",mnames,default=mnames[:min(3,len(mnames))],key="ens_m")
+        ens_models=st.multiselect("Models:",mnames,default=mnames[:min(3,len(mnames))],key="ens_m")
         ens_type=st.radio("Type:",["Soft Voting","Hard Voting","Stacking"],horizontal=True)
         if st.button("Build Ensemble",key="ens_btn") and len(ens_models)>=2:
-            with st.spinner("Building ensemble..."):
+            with st.spinner("Building..."):
                 try:
                     estimators=[(mn,trained[mn]) for mn in ens_models]
-                    prob_models=all(hasattr(trained[mn],"predict_proba") for mn in ens_models)
-                    if ens_type=="Stacking":
-                        ens=StackingClassifier(estimators=estimators,final_estimator=LogisticRegression(max_iter=1000),cv=5)
-                    else:
-                        vt="soft" if ens_type=="Soft Voting" and prob_models else "hard"
-                        ens=VotingClassifier(estimators=estimators,voting=vt)
+                    prob_ok=all(hasattr(trained[mn],"predict_proba") for mn in ens_models)
+                    if ens_type=="Stacking": ens=StackingClassifier(estimators=estimators,final_estimator=LogisticRegression(max_iter=1000),cv=5)
+                    else: ens=VotingClassifier(estimators=estimators,voting="soft" if ens_type=="Soft Voting" and prob_ok else "hard")
                     ens.fit(X_tr,y_tr);yp_ens=ens.predict(X_te)
                     ens_acc=accuracy_score(y_te,yp_ens);ens_f1=f1_score(y_te,yp_ens,average="weighted",zero_division=0)
-                    st.markdown(f'<div class="success-box"><b>Ensemble {ens_type}: Acc={ens_acc:.4f} F1={ens_f1:.4f}</b></div>',unsafe_allow_html=True)
-                    cm_ens=confusion_matrix(y_te,yp_ens);clbl=cn if len(cn)==cm_ens.shape[0] else [str(i) for i in range(cm_ens.shape[0])]
-                    st.plotly_chart(px.imshow(cm_ens,text_auto=True,color_continuous_scale="Greens",x=clbl,y=clbl).update_layout(title=f"Ensemble CM",height=400),use_container_width=True)
+                    st.markdown(f'<div class="success-box"><b>Ensemble: Acc={ens_acc:.4f} F1={ens_f1:.4f}</b></div>',unsafe_allow_html=True)
+                    cm_e=confusion_matrix(y_te,yp_ens);clbl_e=cn if len(cn)==cm_e.shape[0] else [str(i) for i in range(cm_e.shape[0])]
+                    st.plotly_chart(px.imshow(cm_e,text_auto=True,color_continuous_scale="Greens",x=clbl_e,y=clbl_e).update_layout(title="Ensemble CM",height=400),use_container_width=True)
                 except Exception as e: st.error(str(e))
-
     st.markdown("### Statistical Comparison")
     if len(mnames)>=2:
         m1=st.selectbox("Model A:",mnames,index=0,key="stat_a")
         m2=st.selectbox("Model B:",mnames,index=min(1,len(mnames)-1),key="stat_b")
-        if st.button("Run McNemar Test",key="stat_btn") and m1!=m2:
+        if st.button("McNemar Test",key="stat_btn") and m1!=m2:
             pa=preds[m1]["y_pred"];pb=preds[m2]["y_pred"]
             ca=(pa==y_te);cb=(pb==y_te)
             b_val=int(np.sum(ca & ~cb));c_val=int(np.sum(~ca & cb))
-            if b_val+c_val>0:
-                from scipy.stats import binom_test
-                try: p_val=binom_test(b_val,b_val+c_val,0.5)
-                except: p_val=1.0
+            if b_val+c_val>0: p_val=binomtest(b_val,b_val+c_val,0.5).pvalue
             else: p_val=1.0
-            tbl=pd.DataFrame({"":["B correct","B wrong"],f"A correct":[int(np.sum(ca&cb)),c_val],f"A wrong":[b_val,int(np.sum(~ca&~cb))]}).set_index("")
+            tbl=pd.DataFrame({"":["B correct","B wrong"],"A correct":[int(np.sum(ca&cb)),c_val],"A wrong":[b_val,int(np.sum(~ca&~cb))]}).set_index("")
             st.dataframe(tbl,use_container_width=True)
             st.metric("McNemar p-value",f"{p_val:.6f}")
-            if p_val<0.05: st.markdown(f'<div class="success-box"><b>Significant difference (p={p_val:.4f})</b></div>',unsafe_allow_html=True)
-            else: st.markdown(f'<div class="info-box"><b>No significant difference (p={p_val:.4f})</b></div>',unsafe_allow_html=True)
+            if p_val<0.05: st.markdown(f'<div class="success-box"><b>Significant (p={p_val:.4f})</b></div>',unsafe_allow_html=True)
+            else: st.markdown(f'<div class="info-box"><b>Not significant (p={p_val:.4f})</b></div>',unsafe_allow_html=True)
+
 st.markdown("---")
-st.markdown('<div style="text-align:center;color:#888;font-size:0.85rem">ML Classification Suite v2.0 | scikit-learn | All 10 features</div>',unsafe_allow_html=True)
+st.markdown('<div style="text-align:center;color:#888;font-size:0.85rem">ML Classification Suite v2.0</div>',unsafe_allow_html=True)
