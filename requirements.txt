@@ -14,3 +14,4 @@ esda
 mgwr
 streamlit-folium
 openpyxl
+imbalanced-learn
