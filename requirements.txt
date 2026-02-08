@@ -12,3 +12,4 @@ folium
 libpysal
 esda
 mgwr
+streamlit-folium
