@@ -500,7 +500,7 @@ with tab1:
             st.caption(f"{img_input.width} x {img_input.height} px")
         with col_result:
             st.markdown("### \U0001f3af Hasil Klasifikasi")
-            if st.button("\U0001f680 Klasifikasi Sekarang!", type="primary", use_container_width=True, key="cls_btn"):
+            if st.button("\U0001f680 Klasifikasi Sekarang!", type="primary", width="stretch", key="cls_btn"):
                 with st.spinner("Menganalisis..."):
                     t0 = time.time()
                     results = classify_single(img_input, class_mode, model_choice, custom_cats, top_k, confidence_threshold)
@@ -574,7 +574,7 @@ with tab2:
             prog.empty(); status.empty()
             if all_results and HAS_PD:
                 df = pd.DataFrame(all_results)
-                st.dataframe(df, use_container_width=True)
+                st.dataframe(df, width="stretch")
                 pred_counts = df["prediction"].value_counts()
                 c1, c2 = st.columns(2)
                 with c1:
@@ -583,9 +583,9 @@ with tab2:
                 with c2:
                     if HAS_PLOTLY:
                         fig = px.pie(values=pred_counts.values, names=pred_counts.index, title="Distribusi")
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
                 csv_buf = io.StringIO(); df.to_csv(csv_buf, index=False)
-                st.download_button("\U0001f4be Download CSV", csv_buf.getvalue(), "batch_results.csv", "text/csv", use_container_width=True)
+                st.download_button("\U0001f4be Download CSV", csv_buf.getvalue(), "batch_results.csv", "text/csv", width="stretch")
             st.markdown("### Gallery")
             cols = st.columns(4)
             for idx, f in enumerate(batch_files):
@@ -629,7 +629,7 @@ with tab3:
                     img_counts[cat] = len([f for f in os.listdir(cat_path) if f.lower().endswith((".jpg",".jpeg",".png",".bmp",".webp"))])
                 st.success(f"**{len(categories)}** kategori, **{sum(img_counts.values())}** gambar")
                 if HAS_PD:
-                    st.dataframe(pd.DataFrame({"Kategori": categories, "Jumlah": [img_counts[c] for c in categories]}), use_container_width=True)
+                    st.dataframe(pd.DataFrame({"Kategori": categories, "Jumlah": [img_counts[c] for c in categories]}), width="stretch")
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     base_model = st.selectbox("Base Model:", list(PRETRAINED_MODELS.keys()), key="train_base")
@@ -758,7 +758,7 @@ with tab3:
             total_imgs += count
             summary_data.append({"Kategori": cat, "Jumlah Foto": count})
         if HAS_PD:
-            st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
+            st.dataframe(pd.DataFrame(summary_data), width="stretch")
         st.markdown(f"**Total: {total_imgs} gambar**")
 
         # Preview
@@ -834,20 +834,20 @@ with tab3:
                 fig.add_trace(go.Scatter(y=th.get("accuracy", []), name="Train Acc", mode="lines+markers"))
                 fig.add_trace(go.Scatter(y=th.get("val_accuracy", []), name="Val Acc", mode="lines+markers"))
                 fig.update_layout(title="Accuracy", height=350)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
             with c2:
                 fig2 = go.Figure()
                 fig2.add_trace(go.Scatter(y=th.get("loss", []), name="Train Loss", mode="lines+markers"))
                 fig2.add_trace(go.Scatter(y=th.get("val_loss", []), name="Val Loss", mode="lines+markers"))
                 fig2.update_layout(title="Loss", height=350)
-                st.plotly_chart(fig2, use_container_width=True)
+                st.plotly_chart(fig2, width="stretch")
         dl1, dl2, dl3 = st.columns(3)
         with dl1:
             st.download_button("\U0001f4be Download Model (.h5)", st.session_state.trained_model_bytes,
-                "trained_model.h5", use_container_width=True, key="dl_model")
+                "trained_model.h5", width="stretch", key="dl_model")
         with dl2:
             st.download_button("\U0001f4be Download Labels (.txt)", st.session_state.trained_labels_str,
-                "labels.txt", "text/plain", use_container_width=True, key="dl_labels")
+                "labels.txt", "text/plain", width="stretch", key="dl_labels")
         with dl3:
             if st.button("\U0001f5d1\ufe0f Clear Results", key="clear_train"):
                 st.session_state.trained_model_bytes = None
@@ -874,7 +874,7 @@ with tab4:
         if HAS_PD:
             df_h = pd.DataFrame([{"Waktu": h["timestamp"], "Model": h["model"], "Prediksi": h["top_prediction"],
                 "Confidence": f"{h['confidence']*100:.1f}%", "Proses": f"{h['elapsed']:.2f}s"} for h in hd])
-            st.dataframe(df_h, use_container_width=True)
+            st.dataframe(df_h, width="stretch")
         if HAS_PLOTLY:
             cats = [h["top_prediction"] for h in hd]
             cc = {}
@@ -883,13 +883,13 @@ with tab4:
             c1, c2 = st.columns(2)
             with c1:
                 st.plotly_chart(px.bar(x=list(cc.keys()), y=list(cc.values()), title="Distribusi",
-                    labels={"x":"Kategori","y":"Jumlah"}), use_container_width=True)
+                    labels={"x":"Kategori","y":"Jumlah"}), width="stretch")
             with c2:
                 st.plotly_chart(px.histogram(x=[h["confidence"]*100 for h in hd], nbins=20, title="Confidence",
-                    labels={"x":"Confidence (%)"}), use_container_width=True)
+                    labels={"x":"Confidence (%)"}), width="stretch")
         if HAS_PD:
             csv_buf = io.StringIO(); df_h.to_csv(csv_buf, index=False)
-            st.download_button("\U0001f4be CSV", csv_buf.getvalue(), "history.csv", "text/csv", use_container_width=True)
+            st.download_button("\U0001f4be CSV", csv_buf.getvalue(), "history.csv", "text/csv", width="stretch")
     else:
         st.info("Belum ada history.")
 
