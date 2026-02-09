@@ -1,6 +1,6 @@
 """
 ══════════════════════════════════════════════════════════════
-  SSA CORE LIBRARY v4.2 — Singular Spectrum Analysis (1D)
+  SSA CORE LIBRARY v5.0
 ══════════════════════════════════════════════════════════════
 """
 import numpy as np
@@ -19,19 +19,14 @@ class SSA:
         self.original = np.array(time_series, dtype=float).flatten()
         self.N = len(self.original)
         self.name = name
-        if window_length == 'auto':
-            self.L = self.N // 2
-        else:
-            self.L = int(window_length)
+        self.L = self.N // 2 if window_length == 'auto' else int(window_length)
         self.K = self.N - self.L + 1
-        assert 2 <= self.L <= self.N // 2 + 1, \
-            f"L harus antara 2 dan N/2+1. L={self.L}, N={self.N}"
-        self._embed()
-        self._decompose()
+        assert 2 <= self.L <= self.N // 2 + 1
+        self._embed(); self._decompose()
 
     def _embed(self):
         self.trajectory_matrix = np.column_stack(
-            [self.original[i:i + self.L] for i in range(self.K)])
+            [self.original[i:i+self.L] for i in range(self.K)])
 
     def _decompose(self):
         S = self.trajectory_matrix @ self.trajectory_matrix.T
@@ -61,12 +56,12 @@ class SSA:
         return result / counts
 
     def reconstruct_component(self, index):
+        """index: 0-based internal"""
         return self._diagonal_averaging(self.elementary_matrices[index])
 
     # ── W-Correlation ────────────────────────────────────────
     def w_correlation(self, num_components=None):
-        if num_components is None:
-            num_components = min(self.d, 20)
+        if num_components is None: num_components = min(self.d, 20)
         num_components = min(num_components, self.d)
         components = [self.reconstruct_component(i) for i in range(num_components)]
         weights = np.zeros(self.N)
@@ -85,11 +80,11 @@ class SSA:
         self.wcorr_matrix = wc
         return wc
 
-    # ── Auto Grouping: Hierarchical Clustering ───────────────
+    # ── Auto Grouping: Hierarchical ─────────────────────────
     def auto_group_wcorr(self, num_components=None, n_clusters=3,
                          linkage_method='average'):
-        if num_components is None:
-            num_components = min(self.d, 20)
+        """n_clusters >= 2. Indices dalam groups pakai 0-based internal."""
+        if num_components is None: num_components = min(self.d, 20)
         num_components = min(num_components, self.d)
         wcorr = self.w_correlation(num_components)
         dist = 1 - np.abs(wcorr)
@@ -98,11 +93,11 @@ class SSA:
         Z = linkage(condensed, method=linkage_method)
         labels = fcluster(Z, t=n_clusters, criterion='maxclust')
         self._hc_linkage = Z; self._hc_labels = labels
-        groups = {}
+        raw_groups = {}
         for cl in sorted(set(labels)):
-            groups[f'Group_{cl}'] = [i for i,lb in enumerate(labels) if lb==cl]
+            raw_groups[f'Group_{cl}'] = [i for i,lb in enumerate(labels) if lb==cl]
         renamed = {}; trend_found = False; seas_count = 0
-        for gname, members in groups.items():
+        for gname, members in raw_groups.items():
             rc = self.reconstruct_component(members[0])
             freqs, psd = periodogram(rc, fs=1.0)
             dom = freqs[np.argmax(psd[1:])+1] if len(psd)>1 else 0
@@ -161,83 +156,45 @@ class SSA:
         self.reconstructed['_Residual'] = self.original - self.reconstructed['_Total']
         return self.reconstructed
 
-    # ══════════════════════════════════════════════════════════
-    # RECURRENT FORECASTING + KOEFISIEN LRR
-    # ══════════════════════════════════════════════════════════
+    # ── Forecast Recurrent ───────────────────────────────────
     def forecast_recurrent(self, groups, steps=10, use_indices=None):
-        """
-        Recurrent (R) forecasting menggunakan Linear Recurrence Relation (LRR).
-
-        Returns forecast array.
-        Juga menyimpan:
-          self.lrr_coefficients — koefisien a_j, j=1..L-1
-          self.lrr_nu_squared   — ν² (verticality coefficient)
-          self.lrr_formula_info — dict info formula
-        """
         indices = self._resolve_indices(groups, use_indices)
         signal_mat = sum(self.elementary_matrices[i] for i in indices if i < self.d)
         signal = self._diagonal_averaging(signal_mat)
         U_sel = self.U[:, indices]; pi = U_sel[-1, :]
-        nu2 = np.sum(pi**2)
-        nu2_clamped = min(nu2, 0.9999)
-        R = np.sum(pi[np.newaxis,:]*U_sel[:-1,:], axis=1) / (1-nu2_clamped)
-
-        # Simpan koefisien LRR
-        # R[0] = a_{L-1}, R[1] = a_{L-2}, ..., R[L-2] = a_1
-        # Konvensi: x_n = a_1 * x_{n-1} + a_2 * x_{n-2} + ... + a_{L-1} * x_{n-L+1}
-        self.lrr_coefficients = R[::-1].copy()  # a_1, a_2, ..., a_{L-1}
+        nu2 = np.sum(pi**2); nu2c = min(nu2, 0.9999)
+        R = np.sum(pi[np.newaxis,:]*U_sel[:-1,:], axis=1)/(1-nu2c)
+        self.lrr_coefficients = R[::-1].copy()
         self.lrr_nu_squared = nu2
-        self.lrr_info = dict(
-            nu_squared=nu2,
-            num_coefficients=len(R),
-            num_eigentriples_used=len(indices),
-            eigentriple_indices=indices,
-            formula=f"x(n) = Σ a_j * x(n-j), j=1..{len(R)}"
-        )
-
+        self.lrr_info = dict(nu_squared=nu2, num_coefficients=len(R),
+            num_eigentriples_used=len(indices), eigentriple_indices=indices,
+            formula=f"x(n) = Σ a_j * x(n-j), j=1..{len(R)}")
         y = np.concatenate([signal, np.zeros(steps)])
         for t in range(self.N, self.N+steps):
             y[t] = np.dot(R, y[t-self.L+1:t][::-1][:self.L-1])
         self.forecast_r = y; self.forecast_r_steps = steps
         return y
 
-    # ══════════════════════════════════════════════════════════
-    # VECTOR FORECASTING + KOEFISIEN
-    # ══════════════════════════════════════════════════════════
+    # ── Forecast Vector ──────────────────────────────────────
     def forecast_vector(self, groups, steps=10, use_indices=None):
-        """
-        Vector (V) forecasting.
-
-        Juga menyimpan:
-          self.vforecast_coefficients — vektor P_pi (L-1 koefisien)
-          self.vforecast_info — dict info
-        """
         indices = self._resolve_indices(groups, use_indices)
         U_sel = self.U[:, indices]; pi = U_sel[-1, :]
-        nu2 = np.sum(pi**2)
-        nu2_clamped = min(nu2, 0.9999)
-        P_pi = U_sel[:-1,:] @ pi / (1-nu2_clamped)
-
+        nu2 = np.sum(pi**2); nu2c = min(nu2, 0.9999)
+        P_pi = U_sel[:-1,:] @ pi / (1-nu2c)
         self.vforecast_coefficients = P_pi.copy()
         self.vforecast_nu_squared = nu2
-        self.vforecast_info = dict(
-            nu_squared=nu2,
-            num_coefficients=len(P_pi),
-            num_eigentriples_used=len(indices),
-            eigentriple_indices=indices,
-            formula=f"z_hat = P_pi^T * z_last[1:L-1], then diagonal averaging"
-        )
-
+        self.vforecast_info = dict(nu_squared=nu2, num_coefficients=len(P_pi),
+            num_eigentriples_used=len(indices), eigentriple_indices=indices)
         signal_mat = sum(self.elementary_matrices[i] for i in indices if i < self.d)
         signal = self._diagonal_averaging(signal_mat)
         Q = np.column_stack([signal[i:i+self.L] for i in range(self.K)])
         for _ in range(steps):
             last = Q[:,-1]; nl = last[1:]
             Q = np.column_stack([Q, np.append(nl, np.dot(P_pi, nl))])
-        L_e,K_e = Q.shape; N_e = L_e+K_e-1
-        res = np.zeros(N_e); cnt = np.zeros(N_e)
-        for i in range(L_e):
-            for j in range(K_e):
+        Le,Ke = Q.shape; Ne = Le+Ke-1
+        res = np.zeros(Ne); cnt = np.zeros(Ne)
+        for i in range(Le):
+            for j in range(Ke):
                 res[i+j] += Q[i,j]; cnt[i+j] += 1
         y = (res/cnt)[:self.N+steps]
         self.forecast_v = y; self.forecast_v_steps = steps
@@ -248,7 +205,7 @@ class SSA:
         if isinstance(groups, dict): return sorted(set(i for v in groups.values() for i in v))
         return sorted(groups)
 
-    # ── Bootstrap CI & PI ────────────────────────────────────
+    # ── Bootstrap ────────────────────────────────────────────
     def bootstrap_intervals(self, groups, steps=10, method='recurrent',
                             n_bootstrap=500, confidence=0.95):
         indices = self._resolve_indices(groups, None)
@@ -288,23 +245,22 @@ class SSA:
     def evaluate_intervals(actual, lower, upper, confidence=0.95):
         actual=np.array(actual); lower=np.array(lower); upper=np.array(upper)
         n=len(actual); alpha=1-confidence
-        inside = ((actual>=lower)&(actual<=upper)).astype(float)
-        picp = np.mean(inside)
-        widths = upper-lower; mean_w = np.mean(widths)
-        dr = np.max(actual)-np.min(actual)
-        pinaw = mean_w/dr if dr>0 else np.inf
-        ace = picp-confidence
+        inside=((actual>=lower)&(actual<=upper)).astype(float)
+        picp=np.mean(inside); widths=upper-lower; mw=np.mean(widths)
+        dr=np.max(actual)-np.min(actual)
+        pinaw=mw/dr if dr>0 else np.inf
+        ace=picp-confidence
         eta=50; mu=1 if picp<confidence else 0
-        cwc = pinaw*(1+mu*np.exp(-eta*(picp-confidence)))
-        scores = np.zeros(n)
+        cwc=pinaw*(1+mu*np.exp(-eta*(picp-confidence)))
+        scores=np.zeros(n)
         for i in range(n):
             w=widths[i]
             if actual[i]<lower[i]: scores[i]=w+(2/alpha)*(lower[i]-actual[i])
             elif actual[i]>upper[i]: scores[i]=w+(2/alpha)*(actual[i]-upper[i])
             else: scores[i]=w
-        return dict(PICP=picp, PINAW=pinaw, ACE=ace, CWC=cwc,
-                    Winkler_Score=np.mean(scores), Mean_Width=mean_w,
-                    Nominal_Coverage=confidence, N=n)
+        return dict(PICP=picp,PINAW=pinaw,ACE=ace,CWC=cwc,
+            Winkler_Score=np.mean(scores),Mean_Width=mw,
+            Nominal_Coverage=confidence,N=n)
 
     # ── Monte Carlo ──────────────────────────────────────────
     def monte_carlo_test(self, num_surrogates=1000, confidence=0.95):
@@ -313,8 +269,7 @@ class SSA:
         nvar=np.var(ts)*(1-lag1**2); n_eig=min(self.L,self.K)
         surr_eig=np.zeros((num_surrogates,n_eig))
         for s in range(num_surrogates):
-            surr=np.zeros(self.N)
-            surr[0]=np.random.normal(0,np.sqrt(np.var(ts)))
+            surr=np.zeros(self.N); surr[0]=np.random.normal(0,np.sqrt(np.var(ts)))
             for t in range(1,self.N):
                 surr[t]=lag1*surr[t-1]+np.random.normal(0,np.sqrt(max(nvar,1e-12)))
             traj=np.column_stack([surr[i:i+self.L] for i in range(self.N-self.L+1)])
@@ -329,7 +284,7 @@ class SSA:
             surrogate_median=median_s,significant=ev>upper,confidence=confidence)
         return self.mc_results
 
-    # ── Evaluasi point forecast ──────────────────────────────
+    # ── Evaluasi ─────────────────────────────────────────────
     @staticmethod
     def evaluate(actual, predicted):
         actual,predicted=np.array(actual),np.array(predicted)
@@ -346,9 +301,10 @@ class SSA:
             sMAPE_pct=smape,R2=r2,NRMSE=rmse/rng if rng>0 else np.inf,
             MaxAE=np.max(ae),MedAE=np.median(ae))
 
-    def evaluate_split(self, train_size, forecast_values):
-        tn=int(self.N*train_size) if isinstance(train_size,float) and 0<train_size<1 else int(train_size)
-        pred=forecast_values[:self.N]
+    def evaluate_split(self, train_n, forecast_values):
+        """train_n: integer jumlah data training"""
+        tn = int(train_n)
+        pred = forecast_values[:self.N]
         return dict(train=self.evaluate(self.original[:tn],pred[:tn]),
             test=self.evaluate(self.original[tn:],pred[tn:]),
             overall=self.evaluate(self.original,pred),
@@ -373,7 +329,7 @@ class SSA:
         self.residuals=r; self.residual_info=info
         return info
 
-    # ── Save Excel ───────────────────────────────────────────
+    # ── Save ─────────────────────────────────────────────────
     def save_results(self, filename='SSA_Results.xlsx'):
         with pd.ExcelWriter(filename, engine='openpyxl') as w:
             pd.DataFrame({'Original':self.original}).to_excel(w,sheet_name='Data',index_label='t')
@@ -385,19 +341,14 @@ class SSA:
             if hasattr(self,'reconstructed'):
                 rc={'Original':self.original}; rc.update(self.reconstructed)
                 pd.DataFrame(rc).to_excel(w,sheet_name='Rekonstruksi',index_label='t')
-            # LRR Coefficients
             if hasattr(self,'lrr_coefficients'):
-                n_c=len(self.lrr_coefficients)
-                pd.DataFrame({
-                    'j':range(1,n_c+1),
-                    'a_j (LRR coef)':self.lrr_coefficients
-                }).to_excel(w,sheet_name='R_Forecast_Coefficients',index=False)
+                nc=len(self.lrr_coefficients)
+                pd.DataFrame({'j':range(1,nc+1),'a_j':self.lrr_coefficients}).to_excel(
+                    w,sheet_name='R_Coefficients',index=False)
             if hasattr(self,'vforecast_coefficients'):
-                n_c=len(self.vforecast_coefficients)
-                pd.DataFrame({
-                    'j':range(1,n_c+1),
-                    'P_pi_j (V coef)':self.vforecast_coefficients
-                }).to_excel(w,sheet_name='V_Forecast_Coefficients',index=False)
+                nc=len(self.vforecast_coefficients)
+                pd.DataFrame({'j':range(1,nc+1),'P_pi':self.vforecast_coefficients}).to_excel(
+                    w,sheet_name='V_Coefficients',index=False)
             if hasattr(self,'forecast_r') or hasattr(self,'forecast_v'):
                 fc={}
                 if hasattr(self,'forecast_r'): fc['R_Forecast']=self.forecast_r
@@ -411,8 +362,7 @@ class SSA:
                 pd.DataFrame(self.wcorr_matrix,index=lbl,columns=lbl).to_excel(w,sheet_name='W-Correlation')
             if hasattr(self,'bootstrap_result') and self.bootstrap_result:
                 br=self.bootstrap_result
-                pd.DataFrame({
-                    'Forecast_Mean':br['forecast_mean'],
+                pd.DataFrame({'Forecast_Mean':br['forecast_mean'],
                     'CI_Lower':br['ci_lower'],'CI_Upper':br['ci_upper'],
                     'PI_Lower':br['pi_lower'],'PI_Upper':br['pi_upper']
                 }).to_excel(w,sheet_name='Bootstrap_Intervals',index_label='h')
