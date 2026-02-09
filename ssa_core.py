@@ -1,6 +1,6 @@
 """
 ══════════════════════════════════════════════════════════════
-  SSA CORE LIBRARY v5.0
+  SSA CORE LIBRARY v5.1
 ══════════════════════════════════════════════════════════════
 """
 import numpy as np
@@ -56,7 +56,6 @@ class SSA:
         return result / counts
 
     def reconstruct_component(self, index):
-        """index: 0-based internal"""
         return self._diagonal_averaging(self.elementary_matrices[index])
 
     # ── W-Correlation ────────────────────────────────────────
@@ -81,9 +80,15 @@ class SSA:
         return wc
 
     # ── Auto Grouping: Hierarchical ─────────────────────────
-    def auto_group_wcorr(self, num_components=None, n_clusters=3,
+    def auto_group_wcorr(self, num_components=None, n_signal_groups=2,
                          linkage_method='average'):
-        """n_clusters >= 2. Indices dalam groups pakai 0-based internal."""
+        """
+        n_signal_groups: jumlah grup SINYAL yang diinginkan.
+        Contoh:
+          n_signal_groups=1 → 1 grup sinyal + Noise  (cluster=1)
+          n_signal_groups=2 → 2 grup sinyal + Noise  (cluster=2)
+        Total cluster = n_signal_groups, lalu sisa komponen → Noise.
+        """
         if num_components is None: num_components = min(self.d, 20)
         num_components = min(num_components, self.d)
         wcorr = self.w_correlation(num_components)
@@ -91,26 +96,39 @@ class SSA:
         np.fill_diagonal(dist, 0); dist = (dist+dist.T)/2
         condensed = squareform(dist, checks=False)
         Z = linkage(condensed, method=linkage_method)
-        labels = fcluster(Z, t=n_clusters, criterion='maxclust')
+        # Cluster hanya komponen yang di-input
+        n_clust = max(1, n_signal_groups)
+        labels = fcluster(Z, t=n_clust, criterion='maxclust')
         self._hc_linkage = Z; self._hc_labels = labels
+
+        # Buat grup sinyal berdasarkan cluster
         raw_groups = {}
         for cl in sorted(set(labels)):
-            raw_groups[f'Group_{cl}'] = [i for i,lb in enumerate(labels) if lb==cl]
+            raw_groups[cl] = [i for i,lb in enumerate(labels) if lb==cl]
+
+        # Beri nama berdasarkan frekuensi dominan
         renamed = {}; trend_found = False; seas_count = 0
-        for gname, members in raw_groups.items():
+        for cl, members in raw_groups.items():
             rc = self.reconstruct_component(members[0])
             freqs, psd = periodogram(rc, fs=1.0)
             dom = freqs[np.argmax(psd[1:])+1] if len(psd)>1 else 0
             if dom < 0.02 and not trend_found:
                 renamed['Trend'] = members; trend_found = True
             elif dom < 0.02:
-                renamed[f'Trend_{gname}'] = members
+                renamed[f'Low_Freq_{cl}'] = members
             else:
                 seas_count += 1
                 T = 1/dom if dom > 0 else np.inf
                 renamed[f'Seasonal_{seas_count} (T≈{T:.1f})'] = members
-        noise_idx = list(range(num_components, min(self.d, self.L)))
-        if noise_idx: renamed['Noise'] = noise_idx
+
+        # Sisa komponen → Noise
+        used = set(i for v in renamed.values() for i in v)
+        noise_idx = [i for i in range(self.d) if i not in used and i >= num_components]
+        # Juga tambah komponen yg tidak di-cluster sebagai noise
+        noise_idx += [i for i in range(num_components, min(self.d, self.L)) if i not in used]
+        noise_idx = sorted(set(noise_idx))
+        if noise_idx:
+            renamed['Noise'] = noise_idx
         return renamed
 
     # ── Auto Grouping: Periodogram ───────────────────────────
@@ -284,7 +302,6 @@ class SSA:
             surrogate_median=median_s,significant=ev>upper,confidence=confidence)
         return self.mc_results
 
-    # ── Evaluasi ─────────────────────────────────────────────
     @staticmethod
     def evaluate(actual, predicted):
         actual,predicted=np.array(actual),np.array(predicted)
@@ -301,16 +318,6 @@ class SSA:
             sMAPE_pct=smape,R2=r2,NRMSE=rmse/rng if rng>0 else np.inf,
             MaxAE=np.max(ae),MedAE=np.median(ae))
 
-    def evaluate_split(self, train_n, forecast_values):
-        """train_n: integer jumlah data training"""
-        tn = int(train_n)
-        pred = forecast_values[:self.N]
-        return dict(train=self.evaluate(self.original[:tn],pred[:tn]),
-            test=self.evaluate(self.original[tn:],pred[tn:]),
-            overall=self.evaluate(self.original,pred),
-            train_size=tn, test_size=self.N-tn)
-
-    # ── Residual ─────────────────────────────────────────────
     def residual_analysis(self, residuals=None):
         if residuals is None:
             residuals=self.reconstructed.get('_Residual',None)
@@ -329,7 +336,6 @@ class SSA:
         self.residuals=r; self.residual_info=info
         return info
 
-    # ── Save ─────────────────────────────────────────────────
     def save_results(self, filename='SSA_Results.xlsx'):
         with pd.ExcelWriter(filename, engine='openpyxl') as w:
             pd.DataFrame({'Original':self.original}).to_excel(w,sheet_name='Data',index_label='t')
