@@ -1,27 +1,20 @@
 """
 ══════════════════════════════════════════════════════════════
-  SSA CORE LIBRARY v4.0 — Singular Spectrum Analysis (1D)
-  Untuk dipakai oleh Streamlit App
+  SSA CORE LIBRARY v4.1 — Singular Spectrum Analysis (1D)
 ══════════════════════════════════════════════════════════════
 """
-
 import numpy as np
 import pandas as pd
 from scipy.stats import shapiro, jarque_bera
 from scipy.signal import periodogram
 from scipy.spatial.distance import squareform
-from scipy.cluster.hierarchy import linkage, fcluster, dendrogram
+from scipy.cluster.hierarchy import linkage, fcluster
 from statsmodels.stats.diagnostic import acorr_ljungbox
 import warnings
-
 warnings.filterwarnings('ignore')
 
 
 class SSA:
-    """
-    Singular Spectrum Analysis untuk time series 1 dimensi.
-    """
-
     def __init__(self, time_series, window_length='auto', name='Time Series'):
         self.original = np.array(time_series, dtype=float).flatten()
         self.N = len(self.original)
@@ -38,8 +31,7 @@ class SSA:
 
     def _embed(self):
         self.trajectory_matrix = np.column_stack(
-            [self.original[i:i + self.L] for i in range(self.K)]
-        )
+            [self.original[i:i + self.L] for i in range(self.K)])
 
     def _decompose(self):
         S = self.trajectory_matrix @ self.trajectory_matrix.T
@@ -55,22 +47,18 @@ class SSA:
             vi = self.trajectory_matrix.T @ self.U[:, i] / self.singular_values[i]
             self.V[:, i] = vi
             self.elementary_matrices.append(
-                self.singular_values[i] * np.outer(self.U[:, i], vi)
-            )
+                self.singular_values[i] * np.outer(self.U[:, i], vi))
         total_var = np.sum(self.eigenvalues[:self.d])
         self.contribution = self.eigenvalues[:self.d] / total_var * 100
         self.cumulative_contribution = np.cumsum(self.contribution)
 
-    # ── helpers ───────────────────────────────────────────────
     def _diagonal_averaging(self, matrix):
         L, K = matrix.shape
         N = L + K - 1
-        result = np.zeros(N)
-        counts = np.zeros(N)
+        result = np.zeros(N); counts = np.zeros(N)
         for i in range(L):
             for j in range(K):
-                result[i + j] += matrix[i, j]
-                counts[i + j] += 1
+                result[i+j] += matrix[i, j]; counts[i+j] += 1
         return result / counts
 
     def reconstruct_component(self, index):
@@ -85,66 +73,40 @@ class SSA:
         weights = np.zeros(self.N)
         Ls = min(self.L, self.K); Ks = max(self.L, self.K)
         for i in range(self.N):
-            if i < Ls - 1: weights[i] = i + 1
+            if i < Ls-1:   weights[i] = i+1
             elif i < Ks:   weights[i] = Ls
-            else:          weights[i] = self.N - i
+            else:          weights[i] = self.N-i
         wc = np.zeros((num_components, num_components))
         for i in range(num_components):
             for j in range(num_components):
                 wi = np.sqrt(np.sum(weights * components[i]**2))
                 wj = np.sqrt(np.sum(weights * components[j]**2))
                 if wi > 0 and wj > 0:
-                    wc[i, j] = np.sum(weights * components[i] * components[j]) / (wi * wj)
+                    wc[i,j] = np.sum(weights*components[i]*components[j])/(wi*wj)
         self.wcorr_matrix = wc
         return wc
 
-    # ══════════════════════════════════════════════════════════
-    # AUTO GROUPING: HIERARCHICAL CLUSTERING on W-CORRELATION
-    # ══════════════════════════════════════════════════════════
+    # ── Auto Grouping: Hierarchical Clustering on W-Corr ────
     def auto_group_wcorr(self, num_components=None, n_clusters=3,
                          linkage_method='average'):
-        """
-        Hierarchical clustering pada W-Correlation matrix.
-
-        Parameters
-        ----------
-        num_components : int
-        n_clusters : int
-            Jumlah grup/cluster yang diinginkan.
-        linkage_method : str
-            'single', 'complete', 'average', 'centroid', 'ward', 'weighted', 'median'
-        """
         if num_components is None:
             num_components = min(self.d, 20)
         num_components = min(num_components, self.d)
         wcorr = self.w_correlation(num_components)
         dist = 1 - np.abs(wcorr)
-        np.fill_diagonal(dist, 0)
-        dist = (dist + dist.T) / 2
+        np.fill_diagonal(dist, 0); dist = (dist+dist.T)/2
         condensed = squareform(dist, checks=False)
-
-        if linkage_method in ('centroid', 'ward', 'median'):
-            Z = linkage(condensed, method=linkage_method)
-        else:
-            Z = linkage(condensed, method=linkage_method)
-
+        Z = linkage(condensed, method=linkage_method)
         labels = fcluster(Z, t=n_clusters, criterion='maxclust')
-        self._hc_linkage = Z
-        self._hc_labels = labels
-
+        self._hc_linkage = Z; self._hc_labels = labels
         groups = {}
         for cl in sorted(set(labels)):
-            members = [i for i, lb in enumerate(labels) if lb == cl]
-            groups[f'Group_{cl}'] = members
-
-        # rename heuristic: cek periodogram
-        renamed = {}
-        trend_found = False
-        seas_count = 0
+            groups[f'Group_{cl}'] = [i for i,lb in enumerate(labels) if lb==cl]
+        renamed = {}; trend_found = False; seas_count = 0
         for gname, members in groups.items():
             rc = self.reconstruct_component(members[0])
             freqs, psd = periodogram(rc, fs=1.0)
-            dom = freqs[np.argmax(psd[1:]) + 1] if len(psd) > 1 else 0
+            dom = freqs[np.argmax(psd[1:])+1] if len(psd)>1 else 0
             if dom < 0.02 and not trend_found:
                 renamed['Trend'] = members; trend_found = True
             elif dom < 0.02:
@@ -154,74 +116,43 @@ class SSA:
                 T = 1/dom if dom > 0 else np.inf
                 renamed[f'Seasonal_{seas_count} (T≈{T:.1f})'] = members
         noise_idx = list(range(num_components, min(self.d, self.L)))
-        if noise_idx:
-            renamed['Noise'] = noise_idx
+        if noise_idx: renamed['Noise'] = noise_idx
         return renamed
 
-    # ══════════════════════════════════════════════════════════
-    # AUTO GROUPING: PERIODOGRAM-BASED
-    # ══════════════════════════════════════════════════════════
+    # ── Auto Grouping: Periodogram-based ─────────────────────
     def auto_group_periodogram(self, num_components=None,
-                               freq_threshold=0.02,
-                               pair_tolerance=0.01):
-        """
-        Grouping otomatis berbasis periodogram.
-
-        Logika:
-        - Komponen dengan frekuensi dominan < freq_threshold → Trend
-        - Komponen periodik yang frekuensi dominannya berdekatan
-          (selisih < pair_tolerance) → digabung jadi satu grup Seasonal
-        - Sisanya → Noise
-
-        Parameters
-        ----------
-        num_components : int
-        freq_threshold : float
-            Batas frekuensi untuk memisahkan trend vs seasonal.
-        pair_tolerance : float
-            Toleransi selisih frekuensi untuk meng-pair komponen.
-        """
+                               freq_threshold=0.02, pair_tolerance=0.01):
         if num_components is None:
             num_components = max(2, int(np.sum(self.contribution > 0.5)))
             num_components = min(num_components, self.d, 30)
-
         dom_freqs = []
         for i in range(num_components):
             rc = self.reconstruct_component(i)
             freqs, psd = periodogram(rc, fs=1.0)
-            dom = freqs[np.argmax(psd[1:]) + 1] if len(psd) > 1 else 0
+            dom = freqs[np.argmax(psd[1:])+1] if len(psd)>1 else 0
             dom_freqs.append(dom)
-
-        trend_idx = [i for i, f in enumerate(dom_freqs) if f < freq_threshold]
-        seasonal_idx = [i for i, f in enumerate(dom_freqs) if f >= freq_threshold]
-
-        # pair seasonal by similar frequency
-        assigned = set()
-        seasonal_groups = []
+        trend_idx = [i for i,f in enumerate(dom_freqs) if f < freq_threshold]
+        seasonal_idx = [i for i,f in enumerate(dom_freqs) if f >= freq_threshold]
+        assigned = set(); seasonal_groups = []
         for i in seasonal_idx:
-            if i in assigned:
-                continue
+            if i in assigned: continue
             grp = [i]; assigned.add(i)
             for j in seasonal_idx:
-                if j not in assigned and abs(dom_freqs[i] - dom_freqs[j]) < pair_tolerance:
+                if j not in assigned and abs(dom_freqs[i]-dom_freqs[j]) < pair_tolerance:
                     grp.append(j); assigned.add(j)
             seasonal_groups.append(grp)
-
         groups = {}
-        if trend_idx:
-            groups['Trend'] = trend_idx
+        if trend_idx: groups['Trend'] = trend_idx
         for k, grp in enumerate(seasonal_groups, 1):
-            T = 1 / dom_freqs[grp[0]] if dom_freqs[grp[0]] > 0 else np.inf
+            T = 1/dom_freqs[grp[0]] if dom_freqs[grp[0]] > 0 else np.inf
             groups[f'Seasonal_{k} (T≈{T:.1f})'] = grp
         noise_idx = list(range(num_components, min(self.d, self.L)))
-        if noise_idx:
-            groups['Noise'] = noise_idx
+        if noise_idx: groups['Noise'] = noise_idx
         return groups
 
     # ── Reconstruct ──────────────────────────────────────────
     def reconstruct(self, groups):
-        self.groups = groups
-        self.reconstructed = {}
+        self.groups = groups; self.reconstructed = {}
         for name, indices in groups.items():
             mat = sum(self.elementary_matrices[i] for i in indices if i < self.d)
             self.reconstructed[name] = self._diagonal_averaging(mat)
@@ -236,38 +167,33 @@ class SSA:
         indices = self._resolve_indices(groups, use_indices)
         signal_mat = sum(self.elementary_matrices[i] for i in indices if i < self.d)
         signal = self._diagonal_averaging(signal_mat)
-        U_sel = self.U[:, indices]
-        pi = U_sel[-1, :]
+        U_sel = self.U[:, indices]; pi = U_sel[-1, :]
         nu2 = min(np.sum(pi**2), 0.9999)
-        R = np.sum(pi[np.newaxis, :] * U_sel[:-1, :], axis=1) / (1 - nu2)
+        R = np.sum(pi[np.newaxis,:]*U_sel[:-1,:], axis=1)/(1-nu2)
         y = np.concatenate([signal, np.zeros(steps)])
-        for t in range(self.N, self.N + steps):
-            y[t] = np.dot(R, y[t - self.L + 1:t][::-1][:self.L - 1])
-        self.forecast_r = y
-        self.forecast_r_steps = steps
+        for t in range(self.N, self.N+steps):
+            y[t] = np.dot(R, y[t-self.L+1:t][::-1][:self.L-1])
+        self.forecast_r = y; self.forecast_r_steps = steps
         return y
 
     # ── Vector Forecasting ───────────────────────────────────
     def forecast_vector(self, groups, steps=10, use_indices=None):
         indices = self._resolve_indices(groups, use_indices)
-        U_sel = self.U[:, indices]
-        pi = U_sel[-1, :]
+        U_sel = self.U[:, indices]; pi = U_sel[-1, :]
         nu2 = min(np.sum(pi**2), 0.9999)
-        P_pi = U_sel[:-1, :] @ pi / (1 - nu2)
+        P_pi = U_sel[:-1,:] @ pi / (1-nu2)
         signal_mat = sum(self.elementary_matrices[i] for i in indices if i < self.d)
         signal = self._diagonal_averaging(signal_mat)
-        Q = np.column_stack([signal[i:i + self.L] for i in range(self.K)])
+        Q = np.column_stack([signal[i:i+self.L] for i in range(self.K)])
         for _ in range(steps):
-            last = Q[:, -1]
-            new_last = last[1:]
-            Q = np.column_stack([Q, np.append(new_last, np.dot(P_pi, new_last))])
-        L_ext, K_ext = Q.shape
-        N_ext = L_ext + K_ext - 1
-        res = np.zeros(N_ext); cnt = np.zeros(N_ext)
-        for i in range(L_ext):
-            for j in range(K_ext):
-                res[i+j] += Q[i, j]; cnt[i+j] += 1
-        y = (res / cnt)[:self.N + steps]
+            last = Q[:,-1]; nl = last[1:]
+            Q = np.column_stack([Q, np.append(nl, np.dot(P_pi, nl))])
+        L_e,K_e = Q.shape; N_e = L_e+K_e-1
+        res = np.zeros(N_e); cnt = np.zeros(N_e)
+        for i in range(L_e):
+            for j in range(K_e):
+                res[i+j] += Q[i,j]; cnt[i+j] += 1
+        y = (res/cnt)[:self.N+steps]
         self.forecast_v = y; self.forecast_v_steps = steps
         return y
 
@@ -277,70 +203,42 @@ class SSA:
         return sorted(groups)
 
     # ══════════════════════════════════════════════════════════
-    # BOOTSTRAP CONFIDENCE & PREDICTION INTERVALS
+    # BOOTSTRAP CI & PI + EVALUATION METRICS
     # ══════════════════════════════════════════════════════════
     def bootstrap_intervals(self, groups, steps=10, method='recurrent',
                             n_bootstrap=500, confidence=0.95):
         """
-        Bootstrap Confidence Interval (CI) dan Prediction Interval (PI)
-        untuk forecast SSA.
-
-        CI  = interval untuk rata-rata prediksi (uncertainty of model)
-        PI  = interval untuk observasi individual (CI + noise variance)
-
-        Parameters
-        ----------
-        groups : dict
-        steps : int
-        method : 'recurrent' atau 'vector'
-        n_bootstrap : int
-        confidence : float (e.g. 0.95)
-
-        Returns
-        -------
-        dict dengan keys:
-          'forecast_mean', 'ci_lower', 'ci_upper', 'pi_lower', 'pi_upper',
-          'all_forecasts' (matrix n_bootstrap x steps)
+        Bootstrap CI & PI + metrik evaluasi interval:
+          PICP, PINAW, ACE, CWC, Winkler Score, Interval Score
         """
         indices = self._resolve_indices(groups, None)
-
-        # Rekonstruksi signal + residual
         signal_mat = sum(self.elementary_matrices[i] for i in indices if i < self.d)
         signal = self._diagonal_averaging(signal_mat)
         residual = self.original - signal
         residual_std = np.std(residual)
 
         forecasts = np.zeros((n_bootstrap, steps))
-
         for b in range(n_bootstrap):
-            # Resample residual (block bootstrap, block=1 = standard bootstrap)
             boot_resid = np.random.choice(residual, size=self.N, replace=True)
             boot_ts = signal + boot_resid
-
-            # Re-run SSA on bootstrapped series
             try:
                 ssa_b = SSA(boot_ts, window_length=self.L, name='boot')
                 if method == 'vector':
                     fc = ssa_b.forecast_vector(groups, steps=steps)
                 else:
                     fc = ssa_b.forecast_recurrent(groups, steps=steps)
-                forecasts[b, :] = fc[self.N:self.N + steps]
-            except Exception:
-                forecasts[b, :] = np.nan
+                forecasts[b,:] = fc[self.N:self.N+steps]
+            except:
+                forecasts[b,:] = np.nan
 
-        # Remove failed runs
         valid = ~np.any(np.isnan(forecasts), axis=1)
-        forecasts_valid = forecasts[valid]
-
-        if len(forecasts_valid) < 10:
-            return None
+        fv = forecasts[valid]
+        if len(fv) < 10: return None
 
         alpha = 1 - confidence
-        fc_mean = np.mean(forecasts_valid, axis=0)
-        ci_lower = np.percentile(forecasts_valid, alpha/2*100, axis=0)
-        ci_upper = np.percentile(forecasts_valid, (1-alpha/2)*100, axis=0)
-
-        # PI = CI + noise
+        fc_mean = np.mean(fv, axis=0)
+        ci_lower = np.percentile(fv, alpha/2*100, axis=0)
+        ci_upper = np.percentile(fv, (1-alpha/2)*100, axis=0)
         pi_lower = ci_lower - 1.96 * residual_std
         pi_upper = ci_upper + 1.96 * residual_std
 
@@ -348,27 +246,88 @@ class SSA:
             forecast_mean=fc_mean,
             ci_lower=ci_lower, ci_upper=ci_upper,
             pi_lower=pi_lower, pi_upper=pi_upper,
-            all_forecasts=forecasts_valid,
-            confidence=confidence, method=method,
-            residual_std=residual_std
-        )
+            all_forecasts=fv, confidence=confidence,
+            method=method, residual_std=residual_std)
         return self.bootstrap_result
+
+    @staticmethod
+    def evaluate_intervals(actual, lower, upper, confidence=0.95):
+        """
+        Metrik evaluasi Prediction Interval / Confidence Interval.
+
+        Parameters
+        ----------
+        actual : array — nilai aktual
+        lower  : array — batas bawah interval
+        upper  : array — batas atas interval
+        confidence : float — nominal coverage (misal 0.95)
+
+        Returns
+        -------
+        dict dengan:
+          PICP   — Prediction Interval Coverage Probability
+          PINAW  — Prediction Interval Normalized Average Width
+          ACE    — Average Coverage Error (PICP - nominal)
+          CWC    — Coverage Width-based Criterion
+          Winkler — Winkler Score (interval score)
+          MeanWidth — rata-rata lebar interval
+        """
+        actual = np.array(actual); lower = np.array(lower); upper = np.array(upper)
+        n = len(actual)
+        alpha = 1 - confidence
+
+        # PICP
+        inside = ((actual >= lower) & (actual <= upper)).astype(float)
+        picp = np.mean(inside)
+
+        # Width
+        widths = upper - lower
+        mean_width = np.mean(widths)
+
+        # PINAW
+        data_range = np.max(actual) - np.min(actual)
+        pinaw = mean_width / data_range if data_range > 0 else np.inf
+
+        # ACE (Average Coverage Error)
+        ace = picp - confidence
+
+        # CWC (Coverage Width-based Criterion)
+        eta = 50  # penalty factor (standard)
+        mu = 1 if picp < confidence else 0
+        cwc = pinaw * (1 + mu * np.exp(-eta * (picp - confidence)))
+
+        # Winkler Score / Interval Score
+        scores = np.zeros(n)
+        for i in range(n):
+            w = widths[i]
+            if actual[i] < lower[i]:
+                scores[i] = w + (2/alpha) * (lower[i] - actual[i])
+            elif actual[i] > upper[i]:
+                scores[i] = w + (2/alpha) * (actual[i] - upper[i])
+            else:
+                scores[i] = w
+        winkler = np.mean(scores)
+
+        return dict(
+            PICP=picp, PINAW=pinaw, ACE=ace, CWC=cwc,
+            Winkler_Score=winkler, Mean_Width=mean_width,
+            Nominal_Coverage=confidence, N=n)
 
     # ── Monte Carlo SSA ──────────────────────────────────────
     def monte_carlo_test(self, num_surrogates=1000, confidence=0.95):
         ts = self.original - np.mean(self.original)
-        lag1 = np.corrcoef(ts[:-1], ts[1:])[0, 1]
-        nvar = np.var(ts) * (1 - lag1**2)
+        lag1 = np.corrcoef(ts[:-1], ts[1:])[0,1]
+        nvar = np.var(ts)*(1-lag1**2)
         n_eig = min(self.L, self.K)
         surr_eig = np.zeros((num_surrogates, n_eig))
         for s in range(num_surrogates):
             surr = np.zeros(self.N)
             surr[0] = np.random.normal(0, np.sqrt(np.var(ts)))
             for t in range(1, self.N):
-                surr[t] = lag1*surr[t-1] + np.random.normal(0, np.sqrt(max(nvar,1e-12)))
+                surr[t] = lag1*surr[t-1]+np.random.normal(0,np.sqrt(max(nvar,1e-12)))
             traj = np.column_stack([surr[i:i+self.L] for i in range(self.N-self.L+1)])
-            eig = np.linalg.eigvalsh(traj @ traj.T)[::-1]
-            surr_eig[s, :len(eig)] = eig[:n_eig]
+            eig = np.linalg.eigvalsh(traj@traj.T)[::-1]
+            surr_eig[s,:len(eig)] = eig[:n_eig]
         n_test = min(20, self.d)
         lower = np.percentile(surr_eig, (1-confidence)/2*100, axis=0)[:n_test]
         upper = np.percentile(surr_eig, (1+confidence)/2*100, axis=0)[:n_test]
@@ -376,15 +335,14 @@ class SSA:
         ev = self.eigenvalues[:n_test]
         self.mc_results = dict(
             eigenvalues=ev, surrogate_lower=lower, surrogate_upper=upper,
-            surrogate_median=median_s, significant=ev > upper, confidence=confidence
-        )
+            surrogate_median=median_s, significant=ev>upper, confidence=confidence)
         return self.mc_results
 
-    # ── Evaluasi ─────────────────────────────────────────────
+    # ── Evaluasi point forecast ──────────────────────────────
     @staticmethod
     def evaluate(actual, predicted):
         actual, predicted = np.array(actual), np.array(predicted)
-        err = actual - predicted; ae = np.abs(err)
+        err = actual-predicted; ae = np.abs(err)
         rmse = np.sqrt(np.mean(err**2)); mae = np.mean(ae)
         nz = np.abs(actual) > 1e-10
         mape = np.mean(ae[nz]/np.abs(actual[nz]))*100 if nz.any() else np.inf
@@ -406,7 +364,7 @@ class SSA:
             overall=self.evaluate(self.original, pred),
             train_size=tn, test_size=self.N-tn)
 
-    # ── Residual Analysis ────────────────────────────────────
+    # ── Residual ─────────────────────────────────────────────
     def residual_analysis(self, residuals=None):
         if residuals is None:
             residuals = self.reconstructed.get('_Residual', None)
@@ -415,8 +373,8 @@ class SSA:
         info = dict(mean=np.mean(r), std=np.std(r), min_val=np.min(r), max_val=np.max(r),
                     skewness=float(pd.Series(r).skew()), kurtosis=float(pd.Series(r).kurtosis()))
         if len(r) <= 5000:
-            sw_s, sw_p = shapiro(r); info['shapiro_stat']=sw_s; info['shapiro_p']=sw_p
-        jb_s, jb_p = jarque_bera(r); info['jarque_bera_stat']=jb_s; info['jarque_bera_p']=jb_p
+            sw_s,sw_p = shapiro(r); info['shapiro_stat']=sw_s; info['shapiro_p']=sw_p
+        jb_s,jb_p = jarque_bera(r); info['jarque_bera_stat']=jb_s; info['jarque_bera_p']=jb_p
         n_lags = min(20, len(r)//5)
         if n_lags >= 1:
             lb = acorr_ljungbox(r, lags=n_lags, return_df=True)
@@ -430,8 +388,8 @@ class SSA:
         with pd.ExcelWriter(filename, engine='openpyxl') as w:
             pd.DataFrame({'Original':self.original}).to_excel(w, sheet_name='Data', index_label='t')
             pd.DataFrame({
-                'Komponen':range(1,self.d+1), 'Singular_Value':self.singular_values[:self.d],
-                'Eigenvalue':self.eigenvalues[:self.d], 'Kontribusi_pct':self.contribution,
+                'Komponen':range(1,self.d+1),'Singular_Value':self.singular_values[:self.d],
+                'Eigenvalue':self.eigenvalues[:self.d],'Kontribusi_pct':self.contribution,
                 'Kumulatif_pct':self.cumulative_contribution
             }).to_excel(w, sheet_name='Eigenvalues', index=False)
             if hasattr(self,'reconstructed'):
@@ -457,18 +415,27 @@ class SSA:
                 }).to_excel(w, sheet_name='Bootstrap_Intervals', index_label='h')
 
 
-def find_optimal_L(time_series, L_range=None):
+def find_optimal_L(time_series, L_min=None, L_max=None, L_step=None):
+    """
+    Cari L optimal. Range bisa di-custom:
+      L_min : batas bawah (default N//4)
+      L_max : batas atas  (default N//2)
+      L_step: step size   (default max(1, (L_max-L_min)//40))
+    """
     ts = np.array(time_series, dtype=float); N = len(ts)
-    if L_range is None:
-        step = max(1, N//40); L_range = range(3, N//2+1, step)
+    if L_min is None: L_min = max(2, N//4)
+    if L_max is None: L_max = N//2
+    L_min = max(2, int(L_min)); L_max = min(N//2, int(L_max))
+    if L_step is None: L_step = max(1, (L_max-L_min)//40)
+    L_step = max(1, int(L_step))
     results = []
-    for L in L_range:
+    for L in range(L_min, L_max+1, L_step):
         try:
             ssa = SSA(ts, window_length=L)
             n_sig = max(1, int(np.sum(ssa.contribution > 1.0)))
             ssa.reconstruct({'Signal':list(range(n_sig))})
             res = ssa.reconstructed['_Residual']
-            results.append({'L':L,'RMSE':np.sqrt(np.mean(res**2))})
+            results.append({'L':L, 'RMSE':np.sqrt(np.mean(res**2))})
         except: continue
     if not results: return None
     df = pd.DataFrame(results); best = df.loc[df['RMSE'].idxmin()]
