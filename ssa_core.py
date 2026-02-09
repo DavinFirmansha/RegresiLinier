@@ -1,6 +1,6 @@
 """
 ══════════════════════════════════════════════════════════════
-  SSA CORE LIBRARY v5.1
+  SSA CORE LIBRARY v5.2 — Fixed Bootstrap
 ══════════════════════════════════════════════════════════════
 """
 import numpy as np
@@ -82,13 +82,6 @@ class SSA:
     # ── Auto Grouping: Hierarchical ─────────────────────────
     def auto_group_wcorr(self, num_components=None, n_signal_groups=2,
                          linkage_method='average'):
-        """
-        n_signal_groups: jumlah grup SINYAL yang diinginkan.
-        Contoh:
-          n_signal_groups=1 → 1 grup sinyal + Noise  (cluster=1)
-          n_signal_groups=2 → 2 grup sinyal + Noise  (cluster=2)
-        Total cluster = n_signal_groups, lalu sisa komponen → Noise.
-        """
         if num_components is None: num_components = min(self.d, 20)
         num_components = min(num_components, self.d)
         wcorr = self.w_correlation(num_components)
@@ -96,17 +89,12 @@ class SSA:
         np.fill_diagonal(dist, 0); dist = (dist+dist.T)/2
         condensed = squareform(dist, checks=False)
         Z = linkage(condensed, method=linkage_method)
-        # Cluster hanya komponen yang di-input
         n_clust = max(1, n_signal_groups)
         labels = fcluster(Z, t=n_clust, criterion='maxclust')
         self._hc_linkage = Z; self._hc_labels = labels
-
-        # Buat grup sinyal berdasarkan cluster
         raw_groups = {}
         for cl in sorted(set(labels)):
             raw_groups[cl] = [i for i,lb in enumerate(labels) if lb==cl]
-
-        # Beri nama berdasarkan frekuensi dominan
         renamed = {}; trend_found = False; seas_count = 0
         for cl, members in raw_groups.items():
             rc = self.reconstruct_component(members[0])
@@ -120,15 +108,9 @@ class SSA:
                 seas_count += 1
                 T = 1/dom if dom > 0 else np.inf
                 renamed[f'Seasonal_{seas_count} (T≈{T:.1f})'] = members
-
-        # Sisa komponen → Noise
         used = set(i for v in renamed.values() for i in v)
-        noise_idx = [i for i in range(self.d) if i not in used and i >= num_components]
-        # Juga tambah komponen yg tidak di-cluster sebagai noise
-        noise_idx += [i for i in range(num_components, min(self.d, self.L)) if i not in used]
-        noise_idx = sorted(set(noise_idx))
-        if noise_idx:
-            renamed['Noise'] = noise_idx
+        noise_idx = sorted(set(i for i in range(min(self.d, self.L)) if i not in used and i >= num_components))
+        if noise_idx: renamed['Noise'] = noise_idx
         return renamed
 
     # ── Auto Grouping: Periodogram ───────────────────────────
@@ -223,40 +205,98 @@ class SSA:
         if isinstance(groups, dict): return sorted(set(i for v in groups.values() for i in v))
         return sorted(groups)
 
-    # ── Bootstrap ────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════
+    # BOOTSTRAP — FIXED v5.2
+    # ══════════════════════════════════════════════════════════
     def bootstrap_intervals(self, groups, steps=10, method='recurrent',
                             n_bootstrap=500, confidence=0.95):
+        """
+        Bootstrap CI & PI yang konsisten dengan point forecast.
+
+        Perbaikan v5.2:
+        1. Point forecast dihitung DULU sebagai pusat
+        2. Bootstrap menggunakan use_indices (bukan groups dict)
+           sehingga indeks eigentriple konsisten
+        3. Jumlah komponen sinyal di bootstrap SSA ditentukan
+           secara adaptif (r komponen pertama), bukan pakai
+           indeks tetap yang bisa salah di SSA bootstrap
+        4. Interval dibangun sebagai: point_forecast ± quantile(deviasi)
+        """
         indices = self._resolve_indices(groups, None)
+
+        # === Step 1: Hitung point forecast (sama persis dgn forecast biasa) ===
+        if method == 'vector':
+            point_fc_full = self.forecast_vector(groups, steps=steps)
+        else:
+            point_fc_full = self.forecast_recurrent(groups, steps=steps)
+        point_forecast = point_fc_full[self.N:self.N+steps]
+
+        # === Step 2: Hitung signal & residual ===
         signal_mat = sum(self.elementary_matrices[i] for i in indices if i < self.d)
         signal = self._diagonal_averaging(signal_mat)
         residual = self.original - signal
         residual_std = np.std(residual)
-        forecasts = np.zeros((n_bootstrap, steps))
+
+        # Jumlah komponen sinyal yang dipakai
+        r = len(indices)
+
+        # === Step 3: Bootstrap ===
+        deviations = np.zeros((n_bootstrap, steps))
+        n_success = 0
+
         for b in range(n_bootstrap):
             boot_resid = np.random.choice(residual, size=self.N, replace=True)
             boot_ts = signal + boot_resid
             try:
                 ssa_b = SSA(boot_ts, window_length=self.L, name='boot')
+                # Gunakan r komponen PERTAMA (bukan indeks tetap)
+                # Karena SVD mengurutkan berdasarkan eigenvalue,
+                # r komponen pertama di bootstrap ≈ r komponen pertama di original
+                boot_indices = list(range(min(r, ssa_b.d)))
+
                 if method == 'vector':
-                    fc = ssa_b.forecast_vector(groups, steps=steps)
+                    fc_b = ssa_b.forecast_vector(None, steps=steps, 
+                                                  use_indices=boot_indices)
                 else:
-                    fc = ssa_b.forecast_recurrent(groups, steps=steps)
-                forecasts[b,:] = fc[self.N:self.N+steps]
+                    fc_b = ssa_b.forecast_recurrent(None, steps=steps,
+                                                     use_indices=boot_indices)
+                boot_forecast = fc_b[ssa_b.N:ssa_b.N+steps]
+
+                # Simpan DEVIASI dari point forecast bootstrap terhadap 
+                # point forecast asli. Ini mengukur variabilitas.
+                deviations[b,:] = boot_forecast - point_forecast
+                n_success += 1
             except:
-                forecasts[b,:] = np.nan
-        valid = ~np.any(np.isnan(forecasts), axis=1)
-        fv = forecasts[valid]
-        if len(fv) < 10: return None
-        alpha = 1-confidence
-        fc_mean = np.mean(fv, axis=0)
-        ci_lower = np.percentile(fv, alpha/2*100, axis=0)
-        ci_upper = np.percentile(fv, (1-alpha/2)*100, axis=0)
-        pi_lower = ci_lower - 1.96*residual_std
-        pi_upper = ci_upper + 1.96*residual_std
+                deviations[b,:] = np.nan
+
+        valid = ~np.any(np.isnan(deviations), axis=1)
+        dev_valid = deviations[valid]
+        if len(dev_valid) < 10:
+            return None
+
+        alpha = 1 - confidence
+
+        # === Step 4: Bangun interval dari deviasi ===
+        # CI: point_forecast + quantile deviasi
+        dev_lower = np.percentile(dev_valid, alpha/2*100, axis=0)
+        dev_upper = np.percentile(dev_valid, (1-alpha/2)*100, axis=0)
+
+        ci_lower = point_forecast + dev_lower
+        ci_upper = point_forecast + dev_upper
+
+        # PI: CI diperlebar dengan residual std
+        z_alpha = abs(np.percentile(np.random.standard_normal(10000), alpha/2*100))
+        pi_lower = ci_lower - z_alpha * residual_std
+        pi_upper = ci_upper + z_alpha * residual_std
+
         self.bootstrap_result = dict(
-            forecast_mean=fc_mean, ci_lower=ci_lower, ci_upper=ci_upper,
-            pi_lower=pi_lower, pi_upper=pi_upper, all_forecasts=fv,
-            confidence=confidence, method=method, residual_std=residual_std)
+            forecast_mean=point_forecast.copy(),  # mean = point forecast
+            ci_lower=ci_lower, ci_upper=ci_upper,
+            pi_lower=pi_lower, pi_upper=pi_upper,
+            all_deviations=dev_valid,
+            confidence=confidence, method=method,
+            residual_std=residual_std,
+            n_success=len(dev_valid))
         return self.bootstrap_result
 
     @staticmethod
