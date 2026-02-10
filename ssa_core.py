@@ -1,6 +1,6 @@
 """
 ══════════════════════════════════════════════════════════════
-  SSA CORE LIBRARY v5.2 — Fixed Bootstrap
+  SSA CORE LIBRARY v5.4
 ══════════════════════════════════════════════════════════════
 """
 import numpy as np
@@ -58,7 +58,6 @@ class SSA:
     def reconstruct_component(self, index):
         return self._diagonal_averaging(self.elementary_matrices[index])
 
-    # ── W-Correlation ────────────────────────────────────────
     def w_correlation(self, num_components=None):
         if num_components is None: num_components = min(self.d, 20)
         num_components = min(num_components, self.d)
@@ -79,7 +78,6 @@ class SSA:
         self.wcorr_matrix = wc
         return wc
 
-    # ── Auto Grouping: Hierarchical ─────────────────────────
     def auto_group_wcorr(self, num_components=None, n_signal_groups=2,
                          linkage_method='average'):
         if num_components is None: num_components = min(self.d, 20)
@@ -113,7 +111,6 @@ class SSA:
         if noise_idx: renamed['Noise'] = noise_idx
         return renamed
 
-    # ── Auto Grouping: Periodogram ───────────────────────────
     def auto_group_periodogram(self, num_components=None,
                                freq_threshold=0.02, pair_tolerance=0.01):
         if num_components is None:
@@ -144,7 +141,6 @@ class SSA:
         if noise_idx: groups['Noise'] = noise_idx
         return groups
 
-    # ── Reconstruct ──────────────────────────────────────────
     def reconstruct(self, groups):
         self.groups = groups; self.reconstructed = {}
         for name, indices in groups.items():
@@ -156,7 +152,6 @@ class SSA:
         self.reconstructed['_Residual'] = self.original - self.reconstructed['_Total']
         return self.reconstructed
 
-    # ── Forecast Recurrent ───────────────────────────────────
     def forecast_recurrent(self, groups, steps=10, use_indices=None):
         indices = self._resolve_indices(groups, use_indices)
         signal_mat = sum(self.elementary_matrices[i] for i in indices if i < self.d)
@@ -175,7 +170,6 @@ class SSA:
         self.forecast_r = y; self.forecast_r_steps = steps
         return y
 
-    # ── Forecast Vector ──────────────────────────────────────
     def forecast_vector(self, groups, steps=10, use_indices=None):
         indices = self._resolve_indices(groups, use_indices)
         U_sel = self.U[:, indices]; pi = U_sel[-1, :]
@@ -205,98 +199,74 @@ class SSA:
         if isinstance(groups, dict): return sorted(set(i for v in groups.values() for i in v))
         return sorted(groups)
 
-    # ══════════════════════════════════════════════════════════
-    # BOOTSTRAP — FIXED v5.2
-    # ══════════════════════════════════════════════════════════
+    def _forecast_with_lrr(self, signal, R, steps):
+        L1 = len(R)
+        y = np.concatenate([signal, np.zeros(steps)])
+        for t in range(len(signal), len(signal) + steps):
+            y[t] = np.dot(R, y[t-L1:t][::-1][:L1])
+        return y
+
+    def _forecast_vector_with_coeffs(self, signal, P_pi, L, steps):
+        K_sig = len(signal) - L + 1
+        Q = np.column_stack([signal[i:i+L] for i in range(K_sig)])
+        for _ in range(steps):
+            last = Q[:, -1]; nl = last[1:]
+            Q = np.column_stack([Q, np.append(nl, np.dot(P_pi, nl))])
+        Le, Ke = Q.shape; Ne = Le + Ke - 1
+        res = np.zeros(Ne); cnt = np.zeros(Ne)
+        for i in range(Le):
+            for j in range(Ke):
+                res[i+j] += Q[i, j]; cnt[i+j] += 1
+        return (res / cnt)[:len(signal) + steps]
+
     def bootstrap_intervals(self, groups, steps=10, method='recurrent',
                             n_bootstrap=500, confidence=0.95):
-        """
-        Bootstrap CI & PI yang konsisten dengan point forecast.
-
-        Perbaikan v5.2:
-        1. Point forecast dihitung DULU sebagai pusat
-        2. Bootstrap menggunakan use_indices (bukan groups dict)
-           sehingga indeks eigentriple konsisten
-        3. Jumlah komponen sinyal di bootstrap SSA ditentukan
-           secara adaptif (r komponen pertama), bukan pakai
-           indeks tetap yang bisa salah di SSA bootstrap
-        4. Interval dibangun sebagai: point_forecast ± quantile(deviasi)
-        """
         indices = self._resolve_indices(groups, None)
-
-        # === Step 1: Hitung point forecast (sama persis dgn forecast biasa) ===
-        if method == 'vector':
-            point_fc_full = self.forecast_vector(groups, steps=steps)
-        else:
-            point_fc_full = self.forecast_recurrent(groups, steps=steps)
-        point_forecast = point_fc_full[self.N:self.N+steps]
-
-        # === Step 2: Hitung signal & residual ===
         signal_mat = sum(self.elementary_matrices[i] for i in indices if i < self.d)
         signal = self._diagonal_averaging(signal_mat)
         residual = self.original - signal
         residual_std = np.std(residual)
-
-        # Jumlah komponen sinyal yang dipakai
-        r = len(indices)
-
-        # === Step 3: Bootstrap ===
+        if method == 'vector':
+            point_fc_full = self.forecast_vector(groups, steps=steps)
+            P_pi = self.vforecast_coefficients.copy()
+        else:
+            point_fc_full = self.forecast_recurrent(groups, steps=steps)
+            R = self.lrr_coefficients.copy()
+        point_forecast = point_fc_full[self.N:self.N + steps]
         deviations = np.zeros((n_bootstrap, steps))
         n_success = 0
-
         for b in range(n_bootstrap):
             boot_resid = np.random.choice(residual, size=self.N, replace=True)
-            boot_ts = signal + boot_resid
+            boot_signal = signal + boot_resid
             try:
-                ssa_b = SSA(boot_ts, window_length=self.L, name='boot')
-                # Gunakan r komponen PERTAMA (bukan indeks tetap)
-                # Karena SVD mengurutkan berdasarkan eigenvalue,
-                # r komponen pertama di bootstrap ≈ r komponen pertama di original
-                boot_indices = list(range(min(r, ssa_b.d)))
-
                 if method == 'vector':
-                    fc_b = ssa_b.forecast_vector(None, steps=steps, 
-                                                  use_indices=boot_indices)
+                    boot_fc = self._forecast_vector_with_coeffs(boot_signal, P_pi, self.L, steps)
                 else:
-                    fc_b = ssa_b.forecast_recurrent(None, steps=steps,
-                                                     use_indices=boot_indices)
-                boot_forecast = fc_b[ssa_b.N:ssa_b.N+steps]
-
-                # Simpan DEVIASI dari point forecast bootstrap terhadap 
-                # point forecast asli. Ini mengukur variabilitas.
-                deviations[b,:] = boot_forecast - point_forecast
+                    boot_fc = self._forecast_with_lrr(boot_signal, R, steps)
+                boot_forecast = boot_fc[self.N:self.N + steps]
+                deviations[b, :] = boot_forecast - point_forecast
                 n_success += 1
             except:
-                deviations[b,:] = np.nan
-
+                deviations[b, :] = np.nan
         valid = ~np.any(np.isnan(deviations), axis=1)
         dev_valid = deviations[valid]
-        if len(dev_valid) < 10:
-            return None
-
+        if len(dev_valid) < 10: return None
         alpha = 1 - confidence
-
-        # === Step 4: Bangun interval dari deviasi ===
-        # CI: point_forecast + quantile deviasi
         dev_lower = np.percentile(dev_valid, alpha/2*100, axis=0)
         dev_upper = np.percentile(dev_valid, (1-alpha/2)*100, axis=0)
-
         ci_lower = point_forecast + dev_lower
         ci_upper = point_forecast + dev_upper
-
-        # PI: CI diperlebar dengan residual std
-        z_alpha = abs(np.percentile(np.random.standard_normal(10000), alpha/2*100))
-        pi_lower = ci_lower - z_alpha * residual_std
-        pi_upper = ci_upper + z_alpha * residual_std
-
+        from scipy.stats import norm as _norm
+        z_val = _norm.ppf(1 - alpha/2)
+        pi_lower = ci_lower - z_val * residual_std
+        pi_upper = ci_upper + z_val * residual_std
         self.bootstrap_result = dict(
-            forecast_mean=point_forecast.copy(),  # mean = point forecast
+            forecast_mean=point_forecast.copy(),
             ci_lower=ci_lower, ci_upper=ci_upper,
             pi_lower=pi_lower, pi_upper=pi_upper,
             all_deviations=dev_valid,
             confidence=confidence, method=method,
-            residual_std=residual_std,
-            n_success=len(dev_valid))
+            residual_std=residual_std, n_success=n_success)
         return self.bootstrap_result
 
     @staticmethod
@@ -320,7 +290,6 @@ class SSA:
             Winkler_Score=np.mean(scores),Mean_Width=mw,
             Nominal_Coverage=confidence,N=n)
 
-    # ── Monte Carlo ──────────────────────────────────────────
     def monte_carlo_test(self, num_surrogates=1000, confidence=0.95):
         ts=self.original-np.mean(self.original)
         lag1=np.corrcoef(ts[:-1],ts[1:])[0,1]
